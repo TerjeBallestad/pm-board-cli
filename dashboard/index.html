@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PM Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="header">
+  <h1 id="projectTitle">PM Board</h1>
+  <div class="sprint-tabs" id="sprintInfo">
+    <!-- populated by renderSprintTabs() -->
+  </div>
+  <div class="header-actions">
+    <div class="type-filters" id="typeFilters">
+      <!-- populated dynamically from /api/config -->
+    </div>
+    <input type="search" class="search-box" id="searchBox" placeholder="Search...">
+    <button class="btn btn-secondary hidden" id="exploreSprintBtn">Explore</button>
+    <button class="btn btn-primary" id="sprintBtn">+ Sprint</button>
+  </div>
+</header>
+
+<main class="kanban" id="kanbanBoard">
+  <!-- columns populated dynamically from /api/config stages -->
+</main>
+
+<main class="decisions-view hidden" id="decisionsView"></main>
+
+<!-- Full-screen detail overlay -->
+<div class="overlay hidden" id="detailOverlay">
+  <div class="overlay-content" id="detailContent"></div>
+</div>
+
+<!-- New item modal -->
+<div class="modal-backdrop hidden" id="modalBackdrop">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>New Item</h2>
+      <button class="modal-close" id="modalClose">&times;</button>
+    </div>
+    <form id="newItemForm">
+      <div class="form-row">
+        <label>Type</label>
+        <select name="type" id="itemTypeSelect">
+          <!-- populated from config -->
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Priority</label>
+        <select name="priority"><option value="">—</option><option value="critical">Critical</option><option value="balance">Balance</option><option value="feature">Feature</option><option value="polish">Polish</option></select>
+      </div>
+      <div class="form-row">
+        <label>Pillar</label>
+        <select name="pillar" id="fieldPillar"><option value="">--</option></select>
+      </div>
+      <div class="form-row">
+        <label>Title *</label>
+        <input type="text" name="title" required>
+      </div>
+      <div class="form-row">
+        <label>Description</label>
+        <textarea name="body" rows="6" placeholder="Markdown supported — drop or paste images"></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" id="modalCancel">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Sprint modal -->
+<div class="modal-backdrop hidden" id="sprintModalBackdrop">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Start Sprint</h2>
+      <button class="modal-close" id="sprintModalClose">&times;</button>
+    </div>
+    <form id="sprintForm">
+      <div class="form-row">
+        <label>Sprint Name *</label>
+        <input type="text" name="name" required placeholder="e.g. Fix energy balance">
+      </div>
+      <div class="form-row">
+        <label>Problem Statement</label>
+        <textarea name="problemStatement" rows="4" placeholder="Describe the problem or design challenge..."></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" id="sprintModalCancel">Cancel</button>
+        <button type="submit" class="btn btn-primary">Start Sprint</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toasts"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

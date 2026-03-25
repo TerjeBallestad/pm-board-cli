@@ -1,0 +1,612 @@
+#!/usr/bin/env node
+
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, openSync } from 'fs';
+import { join, dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+import { execSync, spawn } from 'child_process';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CONFIG_FILENAME = 'pm.config.json';
+
+// --- Config discovery ---
+function findConfigDir(startDir = process.cwd()) {
+  let dir = resolve(startDir);
+  while (true) {
+    if (existsSync(join(dir, CONFIG_FILENAME))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function readConfig(configDir) {
+  if (!configDir) return null;
+  try {
+    return JSON.parse(readFileSync(join(configDir, CONFIG_FILENAME), 'utf-8'));
+  } catch { return null; }
+}
+
+const configDir = findConfigDir();
+const config = readConfig(configDir);
+const BASE_URL = process.env.PM_URL || `http://localhost:${config?.port || 3333}`;
+
+// Safety: commands that talk to a server require either a config or explicit PM_URL
+const NO_CONFIG_COMMANDS = new Set(['init', '--help', 'update']);
+function requireConfig() {
+  if (!config && !process.env.PM_URL) {
+    process.stderr.write(
+      `No pm.config.json found in any parent directory.\n` +
+      `Run "pm init" to create one, or set PM_URL to target a specific server.\n`
+    );
+    process.exit(1);
+  }
+}
+
+// --- Arg parser ---
+const args = process.argv.slice(2);
+const subcmd = args[0] || '';
+const positional = [];
+const flags = {};
+
+for (let i = 1; i < args.length; i++) {
+  if (args[i].startsWith('--')) {
+    const key = args[i].slice(2);
+    const val = args[i + 1] !== undefined && !args[i + 1].startsWith('--') ? args[++i] : 'true';
+    flags[key] = val;
+  } else {
+    positional.push(args[i]);
+  }
+}
+
+// --- Fetch helper ---
+async function api(method, path, body, { silent = false } = {}) {
+  const url = `${BASE_URL}${path}`;
+  const opts = { method, headers: {} };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  try {
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (!res.ok) {
+      process.stderr.write(`Error ${res.status}: ${JSON.stringify(data)}\n`);
+      process.exit(1);
+    }
+    if (!silent) process.stdout.write(JSON.stringify(data, null, 2) + '\n');
+    return data;
+  } catch (err) {
+    process.stderr.write(`Failed: ${err.message}\nIs the PM server running? Start it with: pm serve\n`);
+    process.exit(1);
+  }
+}
+
+// --- ID prefix routing ---
+function routeById(id) {
+  const upper = id.toUpperCase();
+  // Use config entity types if available, otherwise fallback to defaults
+  const itemPrefixes = config?.entityTypes
+    ? Object.keys(config.entityTypes).filter(p => !['SDD', 'PLAN', 'SPRINT', 'TASK', 'MILESTONE'].includes(p))
+    : ['SB', 'DD', 'DC', 'GAP'];
+
+  for (const prefix of itemPrefixes) {
+    if (upper.startsWith(`${prefix}-`)) return `/api/items/${id}`;
+  }
+  if (upper.startsWith('PLAN-')) return `/api/plans/${id}`;
+  if (upper.startsWith('SDD-')) return `/api/designs/${id}`;
+  if (upper.startsWith('SPRINT-')) return `/api/sprints/${id}`;
+  if (upper.startsWith('TASK-')) {
+    process.stderr.write('Tasks live under plans — use: pm get PLAN-NNN\n');
+    process.exit(1);
+  }
+  process.stderr.write(`Unknown ID prefix: ${id}\n`);
+  process.exit(1);
+}
+
+function commentRoute(id) {
+  const upper = id.toUpperCase();
+  const itemPrefixes = config?.entityTypes
+    ? Object.keys(config.entityTypes).filter(p => !['SDD', 'PLAN', 'SPRINT', 'TASK', 'MILESTONE'].includes(p))
+    : ['SB', 'DD', 'DC', 'GAP'];
+
+  for (const prefix of itemPrefixes) {
+    if (upper.startsWith(`${prefix}-`)) return `/api/items/${id}/comments`;
+  }
+  if (upper.startsWith('SDD-')) return `/api/designs/${id}/comments`;
+  if (upper.startsWith('PLAN-')) return `/api/plans/${id}/comments`;
+  process.stderr.write(`Comments not supported for prefix: ${id}\n`);
+  process.exit(1);
+}
+
+// --- Item body builder ---
+function buildItemBody(type, title) {
+  const body = { type, title };
+  if (flags.priority) body.priority = flags.priority;
+  if (flags.body) body.body = flags.body;
+  if (flags.pillar) body.pillar = flags.pillar;
+  if (flags.sprint) body.sprintId = flags.sprint;
+  if (flags.files) body.affectedFiles = flags.files.split(',');
+  return body;
+}
+
+// --- Help ---
+const projectName = config?.name || 'PM Board';
+const USAGE = `${projectName} — CLI
+
+Usage: pm <command> [args] [--flags]
+
+Setup:
+  init                           Create pm.config.json in current directory
+  serve [--port N]               Start the PM dashboard server (background)
+  stop                           Stop the running PM server
+  update                         Update pm to latest version
+
+Commands:
+  health                         Server health check
+  get <id>                       Get item by ID
+  list [--type T] [--stage S] [--priority P] [--sprint ID]
+                                 List items with optional filters
+  create <type> "title" [--priority P] [--body B] [--pillar P] [--sprint ID] [--files f1,f2]
+                                 Create a new item
+  update <id> [--stage S] [--priority P] [--title T] [--body B] [--pillar P] [--sprint ID]
+                                 Update an item/design/plan
+  comment <id> "text" [--author A]
+                                 Add comment (default author: claude)
+  archive <id> [<id2>...]        Archive items by ID
+  sweep [--days N]               Auto-archive done items (default: 1 day)
+
+Shorthands (get by ID or create):
+  issue [<id>|"title"]           Get or create issue
+  gap [<id>|"title"]             Get or create gap
+  decision [<id>|"title"]        Get or create decision
+  concern [<id>|"title"]         Get or create concern
+  sdd [<id>|"title"]             Get or create SDD [--body B] [--items IDs] [--sprint ID]
+
+SDD:
+  sdds                           List all SDDs
+  sdd create "title" [--body B] [--items IDs] [--sprint SPRINT-NNN]
+
+Plan / Task:
+  plans                          List all plans
+  plan <id>                      Get plan by ID
+  plan create < plan.json        Create plan from JSON on stdin
+  next-task <plan-id>            Get next unblocked task for a plan
+  task-done <plan-id> <task-id> "note"
+                                 Mark task done with progress note
+  task-update <plan-id> <task-id> [--status S] [--passes true|false] [--note N]
+  plan-update <plan-id> [--tasks @file.json] [--title T] [--stage S]
+
+Sprint:
+  sprints                        List all sprints
+  sprint [id]                    Get sprint detail (default: first active sprint)
+
+Exploration / Context:
+  explore <sprint-id>            Generate sprint dossier
+  suggest <sprint-id>            Get suggested items for sprint
+  prompt <type> <id>             Generate scoped prompt (type: item|sdd|plan)
+  review <type> <id>             Generate review prompt (type: sdd|plan)
+
+Environment:
+  PM_URL                         Base URL (default: http://localhost:${config?.port || 3333})
+`;
+
+// --- Init command ---
+function doInit() {
+  const targetDir = process.cwd();
+  const configPath = join(targetDir, CONFIG_FILENAME);
+  if (existsSync(configPath)) {
+    process.stderr.write(`${CONFIG_FILENAME} already exists in ${targetDir}\n`);
+    process.exit(1);
+  }
+  const defaultConfig = JSON.parse(readFileSync(join(__dirname, '..', 'defaults', 'pm.config.json'), 'utf-8'));
+  // Prompt-style: use directory name as project name
+  const dirName = targetDir.split('/').pop() || 'My Project';
+  defaultConfig.name = dirName.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + '\n');
+  // Create data directory
+  const dataDir = join(targetDir, defaultConfig.dataDir);
+  mkdirSync(dataDir, { recursive: true });
+  process.stdout.write(`Created ${CONFIG_FILENAME} for "${defaultConfig.name}"\n`);
+  process.stdout.write(`Data directory: ${defaultConfig.dataDir}\n`);
+  process.stdout.write(`\nStart the dashboard with: pm serve\n`);
+}
+
+// --- PID file helpers ---
+function pidFilePath() {
+  const dataDir = config?.dataDir || '.pm/data';
+  const base = configDir || process.cwd();
+  const pmDir = dirname(join(base, dataDir));
+  return join(pmDir, 'pm.pid');
+}
+
+function writePid(pid) {
+  const pidFile = pidFilePath();
+  mkdirSync(dirname(pidFile), { recursive: true });
+  writeFileSync(pidFile, JSON.stringify({ pid, startedAt: new Date().toISOString() }));
+}
+
+function readPid() {
+  const pidFile = pidFilePath();
+  if (!existsSync(pidFile)) return null;
+  try {
+    return JSON.parse(readFileSync(pidFile, 'utf-8'));
+  } catch { return null; }
+}
+
+function clearPid() {
+  const pidFile = pidFilePath();
+  if (existsSync(pidFile)) unlinkSync(pidFile);
+}
+
+function isProcessAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// --- Serve command ---
+function doServe() {
+  // Check if already running
+  const existing = readPid();
+  if (existing && isProcessAlive(existing.pid)) {
+    process.stdout.write(`PM server already running (PID ${existing.pid}, started ${existing.startedAt})\n`);
+    process.stdout.write(`Stop it with: pm stop\n`);
+    return;
+  }
+
+  const port = flags.port || config?.port || 3333;
+  const serverPath = join(__dirname, '..', 'server.js');
+  const pmDir = dirname(pidFilePath());
+  mkdirSync(pmDir, { recursive: true });
+  const logPath = join(pmDir, 'pm.log');
+  const logFd = openSync(logPath, 'a');
+  const child = spawn('node', [serverPath], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ['ignore', logFd, logFd],
+    detached: true,
+    cwd: configDir || process.cwd()
+  });
+  child.unref();
+
+  writePid(child.pid);
+  process.stdout.write(`PM server started (PID ${child.pid}) → http://localhost:${port}\n`);
+  process.stdout.write(`Stop with: pm stop\n`);
+}
+
+// --- Stop command ---
+function doStop() {
+  const pidData = readPid();
+  if (!pidData) {
+    process.stderr.write('No PM server running (no pid file found)\n');
+    process.exit(1);
+  }
+  if (!isProcessAlive(pidData.pid)) {
+    process.stdout.write(`Server was not running (stale PID ${pidData.pid})\n`);
+    clearPid();
+    return;
+  }
+  process.kill(pidData.pid, 'SIGTERM');
+  process.stdout.write(`Stopped PM server (PID ${pidData.pid})\n`);
+  clearPid();
+}
+
+// --- Self-update command ---
+function doUpdate() {
+  // Stop running server if there is one
+  let wasRunning = false;
+  if (config) {
+    const pidData = readPid();
+    if (pidData && isProcessAlive(pidData.pid)) {
+      process.stdout.write('Stopping server...\n');
+      process.kill(pidData.pid, 'SIGTERM');
+      clearPid();
+      wasRunning = true;
+    }
+  }
+
+  process.stdout.write('Updating @terjeballestad/pm-board-cli...\n');
+  try {
+    execSync('npm install -g @terjeballestad/pm-board-cli@latest', { stdio: 'inherit' });
+    const newPkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
+    process.stdout.write(`Updated to v${newPkg.version}\n`);
+  } catch (e) {
+    process.stderr.write(`Update failed: ${e.message}\n`);
+    process.exit(1);
+  }
+
+  // Restart server if it was running
+  if (wasRunning && config) {
+    process.stdout.write('Restarting server...\n');
+    doServe();
+  }
+}
+
+// --- Command dispatch ---
+async function main() {
+  if (!subcmd || subcmd === '--help' || flags.help === 'true') {
+    process.stdout.write(USAGE);
+    return;
+  }
+
+  // Guard: require config for all commands except init/help
+  if (!NO_CONFIG_COMMANDS.has(subcmd)) {
+    requireConfig();
+  }
+
+  switch (subcmd) {
+    case 'init':
+      doInit();
+      break;
+
+    case 'serve':
+    case 'start':
+      doServe();
+      break;
+
+    case 'stop':
+      doStop();
+      break;
+
+    case 'update':
+      doUpdate();
+      break;
+
+    case 'health':
+      await api('GET', '/api/health');
+      break;
+
+    case 'get': {
+      const id = positional[0];
+      if (!id) { process.stderr.write('Usage: pm get <id>\n'); process.exit(1); }
+      await api('GET', routeById(id));
+      break;
+    }
+
+    case 'list': {
+      const params = new URLSearchParams();
+      if (flags.type) params.set('type', flags.type);
+      if (flags.stage) params.set('stage', flags.stage);
+      if (flags.priority) params.set('priority', flags.priority);
+      if (flags.sprint) params.set('sprintId', flags.sprint);
+      const qs = params.toString();
+      await api('GET', `/api/items${qs ? '?' + qs : ''}`);
+      break;
+    }
+
+    case 'create': {
+      const type = positional[0];
+      const title = positional[1];
+      if (!type || !title) { process.stderr.write('Usage: pm create <type> "title"\n'); process.exit(1); }
+      await api('POST', '/api/items', buildItemBody(type, title));
+      break;
+    }
+
+    case 'update': {
+      const id = positional[0];
+      if (!id) { process.stderr.write('Usage: pm update <id> [--flags]\n'); process.exit(1); }
+      const body = {};
+      if (flags.stage) body.stage = flags.stage;
+      if (flags.priority) body.priority = flags.priority;
+      if (flags.title) body.title = flags.title;
+      if (flags.body) body.body = flags.body;
+      if (flags.pillar !== undefined) body.pillar = flags.pillar;
+      if (flags.sprint) body.sprintId = flags.sprint;
+      await api('PATCH', routeById(id), body);
+      break;
+    }
+
+    case 'comment': {
+      const id = positional[0];
+      const text = positional[1];
+      if (!id || !text) { process.stderr.write('Usage: pm comment <id> "text" [--author A]\n'); process.exit(1); }
+      const path = commentRoute(id);
+      await api('POST', path, { text, author: flags.author || 'claude' });
+      break;
+    }
+
+    case 'archive': {
+      if (positional.length === 0) { process.stderr.write('Usage: pm archive <id> [<id2>...]\n'); process.exit(1); }
+      await api('POST', '/api/items/archive', { ids: positional });
+      break;
+    }
+
+    case 'sweep': {
+      const days = flags.days ? parseInt(flags.days, 10) : 1;
+      await api('POST', '/api/items/archive/sweep', { days });
+      break;
+    }
+
+    case 'next-task': {
+      const planId = positional[0];
+      if (!planId) { process.stderr.write('Usage: pm next-task <plan-id>\n'); process.exit(1); }
+      await api('GET', `/api/plans/${planId}/next-task`);
+      break;
+    }
+
+    case 'task-done': {
+      const planId = positional[0];
+      const taskId = positional[1];
+      const note = positional[2];
+      if (!planId || !taskId || !note) {
+        process.stderr.write('Usage: pm task-done <plan-id> <task-id> "progress note"\n');
+        process.exit(1);
+      }
+      await api('PATCH', `/api/plans/${planId}/tasks/${taskId}`, {
+        passes: true, status: 'done', progressNote: note
+      });
+      break;
+    }
+
+    case 'sdd':
+    case 'design': {
+      const action = positional[0];
+      if (action === 'create') {
+        const title = positional[1];
+        if (!title) { process.stderr.write('Usage: pm sdd create "title" [--body B] [--items IDs] [--sprint ID]\n'); process.exit(1); }
+        const body = { title };
+        if (flags.body) body.body = flags.body;
+        if (flags.items) body.itemIds = flags.items.split(',');
+        if (flags.sprint) body.sprintId = flags.sprint;
+        await api('POST', '/api/designs', body);
+      } else if (action && /^SDD-\d+$/i.test(action)) {
+        await api('GET', `/api/designs/${action}`);
+      } else if (action) {
+        const body = { title: action };
+        if (flags.body) body.body = flags.body;
+        if (flags.items) body.itemIds = flags.items.split(',');
+        if (flags.sprint) body.sprintId = flags.sprint;
+        await api('POST', '/api/designs', body);
+      } else {
+        process.stderr.write('Usage: pm sdd <SDD-id or "title"> | pm sdd create "title"\n');
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'task-update': {
+      const planId = positional[0];
+      const taskId = positional[1];
+      if (!planId || !taskId) {
+        process.stderr.write('Usage: pm task-update <plan-id> <task-id> [--status S] [--passes true|false]\n');
+        process.exit(1);
+      }
+      const body = {};
+      if (flags.status) body.status = flags.status;
+      if (flags.passes) body.passes = flags.passes === 'true';
+      if (flags.note) body.progressNote = flags.note;
+      if (flags.description) body.description = flags.description;
+      if (flags.steps) {
+        try { body.steps = JSON.parse(flags.steps); }
+        catch (e) { process.stderr.write(`Invalid JSON for --steps: ${e.message}\n`); process.exit(1); }
+      }
+      if (flags.verification) body.verification = flags.verification;
+      await api('PATCH', `/api/plans/${planId}/tasks/${taskId}`, body);
+      break;
+    }
+
+    case 'plan-update': {
+      const planId = positional[0];
+      if (!planId) {
+        process.stderr.write('Usage: pm plan-update <plan-id> [--tasks @file.json] [--title T] [--stage S]\n');
+        process.exit(1);
+      }
+      const body = {};
+      if (flags.title) body.title = flags.title;
+      if (flags.stage) body.stage = flags.stage;
+      if (flags.tasks) {
+        const tasksArg = flags.tasks;
+        if (tasksArg.startsWith('@')) {
+          const filePath = tasksArg.slice(1);
+          try {
+            const raw = readFileSync(filePath, 'utf8');
+            body.tasks = JSON.parse(raw);
+          } catch (e) {
+            process.stderr.write(`Failed to read tasks file ${filePath}: ${e.message}\n`);
+            process.exit(1);
+          }
+        } else {
+          try { body.tasks = JSON.parse(tasksArg); }
+          catch (e) { process.stderr.write(`Invalid JSON for --tasks: ${e.message}\n`); process.exit(1); }
+        }
+      }
+      await api('PATCH', `/api/plans/${planId}`, body);
+      break;
+    }
+
+    case 'plan': {
+      const action = positional[0];
+      if (action === 'create') {
+        const chunks = [];
+        for await (const chunk of process.stdin) chunks.push(chunk);
+        const input = Buffer.concat(chunks).toString().trim();
+        if (!input) {
+          process.stderr.write('Usage: pm plan create < plan.json\n');
+          process.exit(1);
+        }
+        let planData;
+        try { planData = JSON.parse(input); }
+        catch (e) { process.stderr.write(`Invalid JSON: ${e.message}\n`); process.exit(1); }
+        await api('POST', '/api/plans', planData);
+      } else if (action && /^PLAN-\d+$/i.test(action)) {
+        await api('GET', `/api/plans/${action}`);
+      } else {
+        process.stderr.write('Usage: pm plan <PLAN-id> | pm plan create < plan.json\n');
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'sdds':
+    case 'designs':
+      await api('GET', '/api/designs');
+      break;
+
+    case 'plans':
+      await api('GET', '/api/plans');
+      break;
+
+    case 'sprints':
+      await api('GET', '/api/sprints');
+      break;
+
+    case 'sprint': {
+      let sprintId = positional[0];
+      if (!sprintId) {
+        const sprints = await api('GET', '/api/sprints', undefined, { silent: true });
+        const active = sprints.find(s => s.status === 'active');
+        if (!active) { process.stderr.write('No active sprint found\n'); process.exit(1); }
+        sprintId = active.id;
+      }
+      await api('GET', `/api/sprints/${sprintId}`);
+      break;
+    }
+
+    case 'explore': {
+      const sprintId = positional[0];
+      if (!sprintId) { process.stderr.write('Usage: pm explore <sprint-id>\n'); process.exit(1); }
+      await api('POST', `/api/sprints/${sprintId}/explore`);
+      break;
+    }
+
+    case 'suggest': {
+      const sprintId = positional[0];
+      if (!sprintId) { process.stderr.write('Usage: pm suggest <sprint-id>\n'); process.exit(1); }
+      await api('POST', `/api/sprints/${sprintId}/suggest`);
+      break;
+    }
+
+    case 'prompt': {
+      const entityType = positional[0];
+      const entityId = positional[1];
+      if (!entityType || !entityId) { process.stderr.write('Usage: pm prompt <type> <id>\n'); process.exit(1); }
+      await api('POST', '/api/context/prompt', { entityType, entityId });
+      break;
+    }
+
+    case 'review': {
+      const entityType = positional[0];
+      const entityId = positional[1];
+      if (!entityType || !entityId) { process.stderr.write('Usage: pm review <type> <id>\n'); process.exit(1); }
+      await api('POST', '/api/context/review', { entityType, entityId });
+      break;
+    }
+
+    case 'issue':
+    case 'gap':
+    case 'decision':
+    case 'concern': {
+      const arg = positional[0];
+      if (!arg) { process.stderr.write(`Usage: pm ${subcmd} <id or "title">\n`); process.exit(1); }
+      if (/^[A-Z]+-\d+$/i.test(arg)) {
+        await api('GET', routeById(arg));
+      } else {
+        await api('POST', '/api/items', buildItemBody(subcmd, arg));
+      }
+      break;
+    }
+
+    default:
+      process.stderr.write(`Unknown command: ${subcmd}\nRun: pm --help\n`);
+      process.exit(1);
+  }
+}
+
+main();

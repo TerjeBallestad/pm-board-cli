@@ -1,0 +1,21 @@
+{
+  "name": "@terjeballestad/pm-board-cli",
+  "version": "0.1.4",
+  "description": "Lightweight file-based project management for agentic workflows",
+  "main": "server.js",
+  "bin": {
+    "pm": "bin/pm"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "yaml": "^2.8.2"
+  },
+  "keywords": ["project-management", "cli", "kanban", "agentic", "ai-agents"],
+  "author": "Terje Ballestad",
+  "license": "MIT"
+}

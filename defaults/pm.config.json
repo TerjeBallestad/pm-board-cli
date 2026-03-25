@@ -1,0 +1,25 @@
+{
+  "name": "My Project",
+  "port": 3333,
+  "dataDir": ".pm/data",
+  "stages": ["inbox", "exploring", "sdd", "planned", "done"],
+  "entityTypes": {
+    "SB":    { "label": "Issue",    "color": "#66d9ef" },
+    "DD":    { "label": "Decision", "color": "#ae81ff" },
+    "DC":    { "label": "Concern",  "color": "#e6db74" },
+    "GAP":   { "label": "Gap",      "color": "#f92672" },
+    "SDD":   { "label": "Design" },
+    "PLAN":  { "label": "Plan" },
+    "SPRINT": { "label": "Sprint" },
+    "TASK":  { "label": "Task" },
+    "MILESTONE": { "label": "Milestone" }
+  },
+  "knowledgeBase": {
+    "command": "qmd query",
+    "scope": null
+  },
+  "templates": null,
+  "frontend": {
+    "dir": null
+  }
+}
