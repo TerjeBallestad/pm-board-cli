@@ -90,8 +90,9 @@ app.get('/api/health', (req, res) => res.json({
 
 // SPA fallback
 if (frontendDir) {
+  const spaIndex = join(frontendDir, 'index.html');
   app.get('/{*path}', (req, res) => {
-    res.sendFile(join(frontendDir, 'index.html'));
+    res.sendFile('index.html', { root: frontendDir });
   });
 }
 

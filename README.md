@@ -1,4 +1,4 @@
-# @terjeballestad/pm-board-cli
+# PM Board CLI
 
 Lightweight, file-based project management for agentic workflows. A kanban dashboard, CLI, and REST API designed to split feature development into minimal-context steps that AI agents can execute independently.
 
@@ -35,44 +35,101 @@ pm serve
 # Open http://localhost:3333
 ```
 
-`pm init` creates a `pm.config.json` and `.pm/data/` directory. The data directory stores all PM artifacts as git-trackable files (YAML frontmatter markdown for items/SDDs, JSON for plans/sprints).
+`pm init` creates a `pm.config.json`, a `.pm/data/` directory for artifacts, and a `.pm/.gitignore` to exclude runtime files (`pm.pid`, `pm.log`). The data directory stores all PM artifacts as git-trackable files (YAML frontmatter markdown for items/SDDs, JSON for plans/sprints).
 
 ## CLI Reference
 
+### Server Lifecycle
+
 ```bash
-# Server
-pm init                          # Create pm.config.json in current directory
-pm serve [--port N]              # Start dashboard server
-
-# Items
-pm issue "title"                 # Create issue
-pm concern "title"               # Create concern
-pm gap "title"                   # Create gap
-pm decision "title"              # Create decision
-pm list [--type T] [--stage S]   # List items with filters
-pm get <id>                      # Get any entity by ID
-pm update <id> --stage done      # Update fields
-pm comment <id> "text"           # Add comment
-
-# SDDs (Solution Design Documents)
-pm sdd "title" --body "..."      # Create SDD
-pm sdds                          # List all SDDs
-
-# Plans & Tasks
-pm plan create < plan.json       # Create plan from JSON
-pm plans                         # List all plans
-pm next-task PLAN-001            # Get next unblocked task (agent API)
-pm task-done PLAN-001 TASK-001 "completed migration"
-
-# Sprints
-pm sprint                        # Get active sprint
-pm sprints                       # List all sprints
-pm explore SPRINT-001            # Generate sprint dossier
-
-# Context & Prompts
-pm prompt sdd SDD-001            # Generate scoped prompt for an entity
-pm review sdd SDD-001            # Generate review prompt with knowledge base context
+pm init                          # Create pm.config.json + data directory
+pm serve [--port N]              # Start dashboard server (background, detached)
+pm stop                          # Stop the running server (by PID)
+pm update                        # Self-update to latest npm version (stops/restarts server)
+pm health                        # Server health check
 ```
+
+`pm serve` detects port conflicts — if another process is already using the port, it fails with a clear message instead of silently dying. The server writes logs to `.pm/pm.log` (truncated on each restart) and its PID to `.pm/pm.pid`.
+
+`pm update` stops any running server, runs `npm install -g @terjeballestad/pm-board-cli@latest`, and restarts the server if it was running.
+
+### Items
+
+Create and manage backlog items (issues, concerns, gaps, decisions):
+
+```bash
+# Shorthands — get by ID or create by title
+pm issue "title"                 # Create issue (or get: pm issue SB-001)
+pm concern "title"               # Create concern (or get: pm concern DC-001)
+pm gap "title"                   # Create gap (or get: pm gap GAP-001)
+pm decision "title"              # Create decision (or get: pm decision DD-001)
+
+# Generic create with explicit type
+pm create <type> "title" [--priority P] [--body B] [--pillar P] [--sprint ID] [--files f1,f2]
+
+# Read
+pm get <id>                      # Get any entity by ID (SB-001, SDD-001, PLAN-001, etc.)
+pm list [--type T] [--stage S] [--priority P] [--sprint ID]
+
+# Update
+pm update <id> [--stage S] [--priority P] [--title T] [--body B] [--pillar P] [--sprint ID]
+pm comment <id> "text" [--author A]   # Add comment (default author: claude)
+
+# Archive
+pm archive <id> [<id2>...]       # Archive one or more items by ID
+pm sweep [--days N]              # Auto-archive items in 'done' stage (default: 1 day old)
+```
+
+### SDDs (Solution Design Documents)
+
+```bash
+pm sdd "title" [--body B] [--items ID1,ID2] [--sprint SPRINT-001]   # Create SDD
+pm sdd SDD-001                   # Get SDD by ID
+pm sdd create "title" [--body B] [--items IDs] [--sprint ID]        # Explicit create
+pm sdds                          # List all SDDs
+```
+
+### Plans & Tasks
+
+```bash
+# Plans
+pm plan create < plan.json       # Create plan from JSON on stdin
+pm plan PLAN-001                 # Get plan by ID
+pm plans                         # List all plans
+pm plan-update PLAN-001 [--tasks @file.json] [--title T] [--stage S]
+
+# Task operations (agent-facing)
+pm next-task PLAN-001            # Get next unblocked task for a plan
+pm task-done PLAN-001 TASK-1 "completed migration"
+pm task-update PLAN-001 TASK-1 [--status S] [--passes true|false] [--note N] [--description D] [--steps '[]'] [--verification V]
+```
+
+`pm next-task` is the primary agent interface — it returns the next task whose dependencies are satisfied, with all context needed to execute it cold.
+
+### Sprints
+
+```bash
+pm sprint                        # Get the first active sprint
+pm sprint SPRINT-001             # Get sprint by ID
+pm sprints                       # List all sprints
+```
+
+### Exploration & Context
+
+```bash
+pm explore SPRINT-001            # Generate sprint dossier (linked items, SDDs, open questions)
+pm suggest SPRINT-001            # Get suggested items for a sprint
+pm prompt <type> <id>            # Generate scoped prompt (type: item, sdd, plan)
+pm review <type> <id>            # Generate review prompt with knowledge base context (type: sdd, plan)
+```
+
+`pm prompt` and `pm review` use configurable templates (see [Prompt Templates](#prompt-templates)) to build context-rich prompts for AI agents. The review variant also queries the knowledge base for relevant background.
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `PM_URL` | Override server URL (default: `http://localhost:<port from config>`) |
 
 ## Configuration
 
@@ -134,6 +191,8 @@ Replace the default prefixes with your own:
 }
 ```
 
+The CLI, API, and dashboard all adapt to your entity types — the shorthand commands (`pm issue`, `pm gap`, etc.) map to whatever prefixes you define.
+
 ## Prompt Templates
 
 Templates control how `pm prompt` and `pm review` generate context for AI agents. They use simple `{{variable}}` substitution — no loops, no conditionals, just slots.
@@ -160,6 +219,22 @@ my-templates/
 
 Compound variables (`linkedItems`, `taskList`, `comments`, etc.) are pre-rendered markdown blobs — the template just places them.
 
+### Example template
+
+```markdown
+You are reviewing an SDD for {{project.name}}.
+
+## Design Document: {{sdd.title}}
+
+{{sdd.body}}
+
+## Linked Items
+{{sdd.linkedItems}}
+
+Review this design for completeness, feasibility, and edge cases.
+Provide your feedback as a numbered list of suggestions.
+```
+
 ## Bring Your Own Frontend
 
 The dashboard is a vanilla JS SPA that talks to the REST API. You can replace it entirely:
@@ -174,31 +249,67 @@ The dashboard is a vanilla JS SPA that talks to the REST API. You can replace it
 
 Point `frontend.dir` at any directory with static files (index.html, JS, CSS). The server serves them and provides the API at `/api/*`. The built-in dashboard is just the default — build a React, Svelte, or whatever frontend that hits the same endpoints.
 
-### Key API endpoints for frontend authors
+### API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/config` | Project name, stages, entity types |
-| `GET /api/items` | List items (query: type, stage, priority, sprintId) |
-| `GET /api/designs` | List SDDs |
-| `GET /api/plans` | List plans |
-| `GET /api/sprints` | List sprints |
-| `GET /api/events` | SSE stream for real-time updates |
-| `GET /api/plans/:id/next-task` | Agent-facing: get next unblocked task |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/config` | GET | Project name, stages, entity types |
+| `/api/health` | GET | Server health check |
+| `/api/items` | GET | List items (query: type, stage, priority, sprintId) |
+| `/api/items` | POST | Create item |
+| `/api/items/:id` | GET | Get item |
+| `/api/items/:id` | PATCH | Update item |
+| `/api/items/:id/comments` | POST | Add comment |
+| `/api/items/archive` | POST | Archive items (`{ ids: [...] }`) |
+| `/api/items/archive/sweep` | POST | Auto-archive done items (`{ days: N }`) |
+| `/api/designs` | GET | List SDDs |
+| `/api/designs` | POST | Create SDD |
+| `/api/designs/:id` | GET | Get SDD |
+| `/api/designs/:id` | PATCH | Update SDD |
+| `/api/designs/:id/comments` | POST | Add SDD comment |
+| `/api/plans` | GET | List plans |
+| `/api/plans` | POST | Create plan |
+| `/api/plans/:id` | GET | Get plan |
+| `/api/plans/:id` | PATCH | Update plan |
+| `/api/plans/:id/next-task` | GET | Get next unblocked task |
+| `/api/plans/:id/tasks/:taskId` | PATCH | Update task |
+| `/api/sprints` | GET | List sprints |
+| `/api/sprints/:id` | GET | Get sprint |
+| `/api/sprints/:id/explore` | POST | Generate sprint dossier |
+| `/api/sprints/:id/suggest` | POST | Get sprint suggestions |
+| `/api/context/prompt` | POST | Generate agent prompt |
+| `/api/context/review` | POST | Generate review prompt |
+| `/api/events` | GET | SSE stream for real-time updates |
+
+### Real-time Updates (SSE)
+
+`GET /api/events` opens a Server-Sent Events stream. The dashboard uses this for live updates without polling. Events are emitted on any data mutation:
+
+```javascript
+const events = new EventSource('/api/events');
+events.onmessage = (e) => {
+  const data = JSON.parse(e.data);
+  // { type: 'item_created', payload: { ... } }
+};
+```
 
 ## Data Storage
 
 All data lives in `dataDir` as git-trackable files:
 
 ```
-.pm/data/
-  meta.json          # ID counters
-  items/             # SB-001.md, DD-001.md, ...
-  designs/           # SDD-001.md
-  plans/             # PLAN-001.json
-  sprints/           # SPRINT-001.json
-  milestones/        # MILESTONE-001.json
-  archive/           # Archived items
+.pm/
+  data/
+    meta.json          # ID counters
+    items/             # SB-001.md, DD-001.md, ...
+    designs/           # SDD-001.md
+    plans/             # PLAN-001.json
+    sprints/           # SPRINT-001.json
+    milestones/        # MILESTONE-001.json
+    archive/           # Archived items
+  .gitignore           # Excludes pm.pid and pm.log
+  pm.pid               # Server PID (runtime, gitignored)
+  pm.log               # Server log (runtime, gitignored, truncated on restart)
 ```
 
 Items and SDDs are stored as markdown with YAML frontmatter. Plans, sprints, and milestones are JSON. All writes are atomic (temp file + rename). Commit the data directory to git for version history and collaboration.
@@ -208,14 +319,16 @@ Items and SDDs are stored as markdown with YAML frontmatter. Plans, sprints, and
 Each project gets its own `pm.config.json` and runs its own server on a separate port:
 
 ```bash
-# Project A
-cd project-a && pm serve --port 3333
+# Project A (port 3333)
+cd project-a && pm init && pm serve
 
-# Project B
-cd project-b && pm serve --port 3334
+# Project B (port 3334 — edit pm.config.json first)
+cd project-b && pm init && pm serve
 ```
 
-The CLI discovers the nearest `pm.config.json` by walking up from your current directory, so `pm list` always targets the right project.
+The CLI discovers the nearest `pm.config.json` by walking up from your current directory, so `pm list` always targets the right project. If no config is found, the CLI refuses to run (no silent fallback to a wrong server).
+
+Port conflicts are detected on startup — if another process is already using the port, `pm serve` fails with a clear error message.
 
 ## License
 

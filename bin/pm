@@ -206,6 +206,12 @@ function doInit() {
   // Create data directory
   const dataDir = join(targetDir, defaultConfig.dataDir);
   mkdirSync(dataDir, { recursive: true });
+  // Create .gitignore for runtime artifacts
+  const pmDir = dirname(dataDir);
+  const gitignorePath = join(pmDir, '.gitignore');
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, 'pm.pid\npm.log\n');
+  }
   process.stdout.write(`Created ${CONFIG_FILENAME} for "${defaultConfig.name}"\n`);
   process.stdout.write(`Data directory: ${defaultConfig.dataDir}\n`);
   process.stdout.write(`\nStart the dashboard with: pm serve\n`);
@@ -253,11 +259,23 @@ function doServe() {
   }
 
   const port = flags.port || config?.port || 3333;
+
+  // Check if port is already in use
+  try {
+    execSync(`lsof -ti :${port}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    process.stderr.write(`Port ${port} is already in use.\n`);
+    process.stderr.write(`Another PM server or process is running on that port.\n`);
+    process.stderr.write(`Change "port" in pm.config.json or stop the other process.\n`);
+    process.exit(1);
+  } catch {
+    // lsof exits non-zero when nothing is on the port — that's what we want
+  }
+
   const serverPath = join(__dirname, '..', 'server.js');
   const pmDir = dirname(pidFilePath());
   mkdirSync(pmDir, { recursive: true });
   const logPath = join(pmDir, 'pm.log');
-  const logFd = openSync(logPath, 'a');
+  const logFd = openSync(logPath, 'w');
   const child = spawn('node', [serverPath], {
     env: { ...process.env, PORT: String(port) },
     stdio: ['ignore', logFd, logFd],
