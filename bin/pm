@@ -118,6 +118,24 @@ function commentRoute(id) {
   process.exit(1);
 }
 
+// --- Body resolution (inline string, @file, or - for stdin) ---
+async function resolveBody() {
+  if (!flags.body) return;
+  if (flags.body === '-') {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    flags.body = Buffer.concat(chunks).toString().trim();
+  } else if (flags.body.startsWith('@')) {
+    const filePath = flags.body.slice(1);
+    try {
+      flags.body = readFileSync(filePath, 'utf-8');
+    } catch (e) {
+      process.stderr.write(`Failed to read body file ${filePath}: ${e.message}\n`);
+      process.exit(1);
+    }
+  }
+}
+
 // --- Item body builder ---
 function buildItemBody(type, title) {
   const body = { type, title };
@@ -126,6 +144,18 @@ function buildItemBody(type, title) {
   if (flags.pillar) body.pillar = flags.pillar;
   if (flags.sprint) body.sprintId = flags.sprint;
   if (flags.files) body.affectedFiles = flags.files.split(',');
+  return body;
+}
+
+// --- Generic patch body builder (forwards all flags, maps known aliases) ---
+function buildPatchBody() {
+  const body = {};
+  for (const [key, val] of Object.entries(flags)) {
+    if (key === 'sprint') body.sprintId = val;
+    else if (key === 'files') body.affectedFiles = val.split(',');
+    else if (key === 'items') body.itemIds = val.split(',');
+    else body[key] = val;
+  }
   return body;
 }
 
@@ -148,12 +178,18 @@ Commands:
                                  List items with optional filters
   create <type> "title" [--priority P] [--body B] [--pillar P] [--sprint ID] [--files f1,f2]
                                  Create a new item
-  update <id> [--stage S] [--priority P] [--title T] [--body B] [--pillar P] [--sprint ID]
-                                 Update an item/design/plan
+  patch <id> [--key value ...]   Update any field on an item/design/plan
   comment <id> "text" [--author A]
                                  Add comment (default author: claude)
   archive <id> [<id2>...]        Archive items by ID
   sweep [--days N]               Auto-archive done items (default: 1 day)
+
+  Common patch fields:
+    --stage S       Move to stage
+    --body TEXT     Set body (or --body @file.md, --body -)
+    --priority P    Set priority
+    --title T       Rename
+    Fields vary by entity type. Unknown fields are rejected by the server.
 
 Shorthands (get by ID or create):
   issue [<id>|"title"]           Get or create issue
@@ -337,9 +373,52 @@ function doUpdate() {
   }
 }
 
+// --- Per-command help ---
+const PATCH_HELP = `Usage: pm patch <id> [--key value ...]
+
+Update any field on an item, design, or plan.
+
+Items (SB, DD, DC, GAP, ...):
+  --title T            Rename
+  --body TEXT           Set body (--body @file.md to read from file, --body - for stdin)
+  --stage S             Move to stage (${config?.stages?.join(', ') || 'inbox, exploring, sdd, planned, done'})
+  --priority P          Set priority (low, medium, high, critical)
+  --pillar P            Set design pillar
+  --sprint SPRINT-NNN   Assign to sprint
+  --files f1,f2         Set affected files (comma-separated)
+
+Designs (SDD):
+  --title T             Rename
+  --body TEXT           Set body (--body @file.md, --body -)
+  --stage S             Move to stage
+  --items IDs           Set linked item IDs (comma-separated)
+  --sprint SPRINT-NNN   Assign to sprint
+
+Plans (PLAN):
+  --title T             Rename
+  --stage S             Move to stage
+  --context TEXT        Set plan context
+  --sprint SPRINT-NNN   Assign to sprint
+  --tasks @file.json    Replace all tasks from JSON file
+
+Sprints (SPRINT):
+  --name N              Rename
+  --status S            Set status (active, completed)
+`;
+
+const COMMAND_HELP = { patch: PATCH_HELP };
+
 // --- Command dispatch ---
 async function main() {
-  if (!subcmd || subcmd === '--help' || flags.help === 'true') {
+  if (!subcmd || subcmd === '--help') {
+    process.stdout.write(USAGE);
+    return;
+  }
+  if (flags.help === 'true' && COMMAND_HELP[subcmd]) {
+    process.stdout.write(COMMAND_HELP[subcmd]);
+    return;
+  }
+  if (flags.help === 'true') {
     process.stdout.write(USAGE);
     return;
   }
@@ -393,21 +472,16 @@ async function main() {
       const type = positional[0];
       const title = positional[1];
       if (!type || !title) { process.stderr.write('Usage: pm create <type> "title"\n'); process.exit(1); }
+      await resolveBody();
       await api('POST', '/api/items', buildItemBody(type, title));
       break;
     }
 
-    case 'update': {
+    case 'patch': {
       const id = positional[0];
-      if (!id) { process.stderr.write('Usage: pm update <id> [--flags]\n'); process.exit(1); }
-      const body = {};
-      if (flags.stage) body.stage = flags.stage;
-      if (flags.priority) body.priority = flags.priority;
-      if (flags.title) body.title = flags.title;
-      if (flags.body) body.body = flags.body;
-      if (flags.pillar !== undefined) body.pillar = flags.pillar;
-      if (flags.sprint) body.sprintId = flags.sprint;
-      await api('PATCH', routeById(id), body);
+      if (!id) { process.stderr.write('Usage: pm patch <id> [--key value ...]\n'); process.exit(1); }
+      await resolveBody();
+      await api('PATCH', routeById(id), buildPatchBody());
       break;
     }
 
@@ -459,14 +533,21 @@ async function main() {
       if (action === 'create') {
         const title = positional[1];
         if (!title) { process.stderr.write('Usage: pm sdd create "title" [--body B] [--items IDs] [--sprint ID]\n'); process.exit(1); }
+        await resolveBody();
         const body = { title };
         if (flags.body) body.body = flags.body;
         if (flags.items) body.itemIds = flags.items.split(',');
         if (flags.sprint) body.sprintId = flags.sprint;
         await api('POST', '/api/designs', body);
       } else if (action && /^SDD-\d+$/i.test(action)) {
-        await api('GET', `/api/designs/${action}`);
+        if (Object.keys(flags).length > 0) {
+          await resolveBody();
+          await api('PATCH', `/api/designs/${action}`, buildPatchBody());
+        } else {
+          await api('GET', `/api/designs/${action}`);
+        }
       } else if (action) {
+        await resolveBody();
         const body = { title: action };
         if (flags.body) body.body = flags.body;
         if (flags.items) body.itemIds = flags.items.split(',');
@@ -614,8 +695,14 @@ async function main() {
       const arg = positional[0];
       if (!arg) { process.stderr.write(`Usage: pm ${subcmd} <id or "title">\n`); process.exit(1); }
       if (/^[A-Z]+-\d+$/i.test(arg)) {
-        await api('GET', routeById(arg));
+        if (Object.keys(flags).length > 0) {
+          await resolveBody();
+          await api('PATCH', routeById(arg), buildPatchBody());
+        } else {
+          await api('GET', routeById(arg));
+        }
       } else {
+        await resolveBody();
         await api('POST', '/api/items', buildItemBody(subcmd, arg));
       }
       break;
