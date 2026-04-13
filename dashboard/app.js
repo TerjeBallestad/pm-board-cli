@@ -67,7 +67,7 @@ function applyRoute() {
     // Overlay routes — keep current board state, show overlay after render
     state.view = "board";
   } else {
-    // "/" — default: auto-select first active sprint
+    // "/" — default: auto-select most recent active sprint
     state.view = "board";
     if (state.activeSprints.length > 0 && !state.selectedSprintId) {
       state.selectedSprintId = state.activeSprints[0].id;
@@ -549,8 +549,8 @@ async function loadAll() {
   state.sprints = sprints || [];
 
   // Determine active sprints
-  state.activeSprints = state.sprints.filter((s) => s.status === "active");
-  // Auto-select first active sprint if nothing selected
+  state.activeSprints = state.sprints.filter((s) => s.status === "active").reverse();
+  // Auto-select most recent active sprint if nothing selected
   if (state.selectedSprintId === null && state.activeSprints.length > 0) {
     state.selectedSprintId = state.activeSprints[0].id;
   }
@@ -2600,7 +2600,7 @@ async function init() {
     }
     // Recompute sprint tabs if sprint data changed
     if (entity === "sprint") {
-      state.activeSprints = state.sprints.filter((s) => s.status === "active");
+      state.activeSprints = state.sprints.filter((s) => s.status === "active").reverse();
       if (
         state.selectedSprintId &&
         !state.activeSprints.find((s) => s.id === state.selectedSprintId)

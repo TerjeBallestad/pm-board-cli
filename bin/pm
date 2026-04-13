@@ -650,7 +650,7 @@ async function main() {
       let sprintId = positional[0];
       if (!sprintId) {
         const sprints = await api('GET', '/api/sprints', undefined, { silent: true });
-        const active = sprints.find(s => s.status === 'active');
+        const active = sprints.findLast(s => s.status === 'active');
         if (!active) { process.stderr.write('No active sprint found\n'); process.exit(1); }
         sprintId = active.id;
       }
