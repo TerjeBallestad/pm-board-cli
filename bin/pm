@@ -147,8 +147,32 @@ function buildItemBody(type, title) {
   return body;
 }
 
+// --- Resolve @file references for JSON array flags (e.g. --tasks @file.json) ---
+function resolveJsonFlag(key) {
+  if (!flags[key]) return;
+  let raw = flags[key];
+  if (typeof raw === 'string' && raw.startsWith('@')) {
+    const filePath = raw.slice(1);
+    try {
+      raw = readFileSync(filePath, 'utf-8');
+    } catch (e) {
+      process.stderr.write(`Failed to read ${key} file ${filePath}: ${e.message}\n`);
+      process.exit(1);
+    }
+  }
+  if (typeof raw === 'string') {
+    try {
+      flags[key] = JSON.parse(raw);
+    } catch (e) {
+      process.stderr.write(`Failed to parse ${key} as JSON: ${e.message}\n`);
+      process.exit(1);
+    }
+  }
+}
+
 // --- Generic patch body builder (forwards all flags, maps known aliases) ---
 function buildPatchBody() {
+  resolveJsonFlag('tasks');
   const body = {};
   for (const [key, val] of Object.entries(flags)) {
     if (key === 'sprint') body.sprintId = val;
