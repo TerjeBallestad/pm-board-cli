@@ -8,13 +8,12 @@ The `pm` command runs from the **global npm install**, not this dev repo:
 which pm  =>  ~/.nvm/.../lib/node_modules/@terjeballestad/pm-board-cli/bin/pm
 ```
 
-Editing files in this repo has NO effect until you publish and update. After committing a fix:
+Editing files in this repo has NO effect until you reinstall globally. After committing a fix:
 
 ```bash
 cd /Users/godstemning/dev/pm-board-cli
 npm version patch
-npm publish
-pm update              # pulls down the latest package globally
+npm install -g .       # reinstalls from local repo to global
 ```
 
 **Server changes** (anything in `server.js`, `api/`, `lib/`) also require a server restart after updating:
