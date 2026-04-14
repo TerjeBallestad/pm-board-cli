@@ -8,11 +8,21 @@ The `pm` command runs from the **global npm install**, not this dev repo:
 which pm  =>  ~/.nvm/.../lib/node_modules/@terjeballestad/pm-board-cli/bin/pm
 ```
 
-Editing files in this repo has NO effect on the running `pm` command. After committing a fix, ask the user to publish and update:
+Editing files in this repo has NO effect on the running `pm` command.
+
+**Verifying CLI fixes** — run the dev copy directly to test without touching the global install:
+
+```bash
+node /Users/godstemning/dev/pm-board-cli/bin/pm patch PLAN-001 --tasks @file.json
+```
+
+This uses your edited code while the production `pm` remains untouched. Compare behavior between the two if needed.
+
+**After verifying**, ask the user to publish and update (requires login + OTP — agents cannot do this):
 
 ```bash
 npm version patch      # bump version
-npm publish            # requires user login + OTP — agents cannot do this
+npm publish            # user only
 pm update              # pulls the new version globally
 ```
 
