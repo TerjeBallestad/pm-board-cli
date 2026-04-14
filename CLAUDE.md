@@ -8,15 +8,21 @@ The `pm` command runs from the **global npm install**, not this dev repo:
 which pm  =>  ~/.nvm/.../lib/node_modules/@terjeballestad/pm-board-cli/bin/pm
 ```
 
-The global install is symlinked to this dev repo (via `npm install -g .`), so **CLI changes** (`bin/pm`) take effect immediately after saving the file.
+Editing files in this repo has NO effect on the running `pm` command. After committing a fix, ask the user to publish and update:
 
-**Server changes** (anything in `server.js`, `api/`, `lib/`) require a server restart — the server is a long-running process that caches code in memory:
+```bash
+npm version patch      # bump version
+npm publish            # requires user login + OTP — agents cannot do this
+pm update              # pulls the new version globally
+```
+
+**Server changes** (anything in `server.js`, `api/`, `lib/`) also require a server restart after updating:
 
 ```bash
 pm serve --restart   # or kill the process and re-run pm serve
 ```
 
-**Publishing** (`npm publish`) requires login and OTP — only the user can do this. Don't attempt it. For local development, the symlink means changes are live without publishing.
+The server is a long-running process that caches code in memory. CLI changes take effect after `pm update`; server changes need both `pm update` and a restart.
 
 ## Architecture
 
