@@ -239,6 +239,10 @@ Plan / Task:
 Sprint:
   sprints                        List all sprints
   sprint [id]                    Get sprint detail (default: first active sprint)
+  sprint create "name" [--body "problem statement"]
+                                 Create a new sprint (status: active)
+  sprint <SPRINT-id> [--name N] [--body B] [--status S]
+                                 Patch sprint (--body maps to problemStatement)
 
 Exploration / Context:
   explore <sprint-id>            Generate sprint dossier
@@ -496,6 +500,15 @@ async function main() {
       const type = positional[0];
       const title = positional[1];
       if (!type || !title) { process.stderr.write('Usage: pm create <type> "title"\n'); process.exit(1); }
+      // Reserved entity types have dedicated creation commands — rejecting these
+      // prevents creating orphaned items with reserved prefixes (e.g. SPRINT-N
+      // items that aren't real sprints).
+      const RESERVED = { sprint: 'pm sprint create "name"', sdd: 'pm sdd create "title"', design: 'pm sdd create "title"', plan: 'pm plan create < plan.json', task: 'pm task-update <plan-id> <task-id>', milestone: 'milestones have no CLI creation yet' };
+      const reservedHint = RESERVED[type.toLowerCase()];
+      if (reservedHint) {
+        process.stderr.write(`"${type}" is not a generic item type. Use: ${reservedHint}\n`);
+        process.exit(1);
+      }
       await resolveBody();
       await api('POST', '/api/items', buildItemBody(type, title));
       break;
@@ -671,7 +684,33 @@ async function main() {
       break;
 
     case 'sprint': {
-      let sprintId = positional[0];
+      const action = positional[0];
+      // pm sprint create "name" [--body "problem statement"]
+      if (action === 'create') {
+        const name = positional[1];
+        if (!name) { process.stderr.write('Usage: pm sprint create "name" [--body "problem statement"]\n'); process.exit(1); }
+        await resolveBody();
+        const body = { name };
+        // --body and --problem-statement both map to problemStatement (API field name)
+        if (flags.body) body.problemStatement = flags.body;
+        if (flags['problem-statement']) body.problemStatement = flags['problem-statement'];
+        await api('POST', '/api/sprints', body);
+        break;
+      }
+      // pm sprint SPRINT-NNN --name "..." (patch shorthand)
+      if (action && /^SPRINT-\d+$/i.test(action) && Object.keys(flags).length > 0) {
+        await resolveBody();
+        const patchBody = {};
+        for (const [key, val] of Object.entries(flags)) {
+          // Accept --body as alias for problemStatement on sprints
+          if (key === 'body' || key === 'problem-statement') patchBody.problemStatement = val;
+          else patchBody[key] = val;
+        }
+        await api('PATCH', `/api/sprints/${action}`, patchBody);
+        break;
+      }
+      // pm sprint [id] — get sprint detail (default: active sprint)
+      let sprintId = action;
       if (!sprintId) {
         const sprints = await api('GET', '/api/sprints', undefined, { silent: true });
         const active = sprints.findLast(s => s.status === 'active');
