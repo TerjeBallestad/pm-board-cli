@@ -35,6 +35,7 @@ let _skipPush = false; // prevent pushRoute during applyRoute-triggered renders
 
 function currentBoardPath() {
   if (state.view === "decisions") return "/decisions";
+  if (state.view === "tests") return "/tests";
   return state.selectedSprintId ? `/sprint/${state.selectedSprintId}` : "/board";
 }
 
@@ -57,6 +58,9 @@ function applyRoute() {
   if (section === "decisions") {
     state.view = "decisions";
     state.selectedSprintId = null;
+  } else if (section === "tests") {
+    state.view = "tests";
+    state.selectedSprintId = null;
   } else if (section === "sprint" && id) {
     state.view = "board";
     state.selectedSprintId = id;
@@ -75,14 +79,25 @@ function applyRoute() {
   }
 
   // Render base view
+  const kanbanEl = document.getElementById("kanbanBoard");
+  const decisionsEl = document.getElementById("decisionsView");
+  const testsEl = document.getElementById("testsView");
   if (state.view === "decisions") {
-    document.getElementById("kanbanBoard").classList.add("hidden");
-    document.getElementById("decisionsView").classList.remove("hidden");
+    kanbanEl.classList.add("hidden");
+    decisionsEl.classList.remove("hidden");
+    testsEl.classList.add("hidden");
     renderSprintTabs();
     renderDecisionsView();
+  } else if (state.view === "tests") {
+    kanbanEl.classList.add("hidden");
+    decisionsEl.classList.add("hidden");
+    testsEl.classList.remove("hidden");
+    renderSprintTabs();
+    renderTestsView();
   } else {
-    document.getElementById("kanbanBoard").classList.remove("hidden");
-    document.getElementById("decisionsView").classList.add("hidden");
+    kanbanEl.classList.remove("hidden");
+    decisionsEl.classList.add("hidden");
+    testsEl.classList.add("hidden");
     renderSprintTabs();
     renderBoard();
   }
@@ -642,16 +657,21 @@ function renderSprintTabs() {
     `<button class="sprint-tab tab-decisions${state.view === "decisions" ? " tab-active" : ""}">
       <span class="sprint-tab-dot" style="background:var(--accent)"></span>
       Decisions
+    </button>` +
+    `<button class="sprint-tab tab-tests${state.view === "tests" ? " tab-active" : ""}">
+      <span class="sprint-tab-dot" style="background:var(--accent)"></span>
+      Tests
     </button>`;
 
   // Wire sprint/all-items tab clicks
-  container.querySelectorAll(".sprint-tab:not(.tab-decisions)").forEach((btn) => {
+  container.querySelectorAll(".sprint-tab:not(.tab-decisions):not(.tab-tests)").forEach((btn) => {
     btn.addEventListener("click", () => {
       const rawId = btn.dataset.sprintId;
       state.selectedSprintId = rawId === "" ? null : rawId;
       state.view = "board";
       document.getElementById("kanbanBoard").classList.remove("hidden");
       document.getElementById("decisionsView").classList.add("hidden");
+      document.getElementById("testsView").classList.add("hidden");
       renderSprintTabs();
       renderBoard();
       pushRoute(rawId ? `/sprint/${rawId}` : "/board");
@@ -663,9 +683,21 @@ function renderSprintTabs() {
     state.view = "decisions";
     document.getElementById("kanbanBoard").classList.add("hidden");
     document.getElementById("decisionsView").classList.remove("hidden");
+    document.getElementById("testsView").classList.add("hidden");
     renderSprintTabs();
     renderDecisionsView();
     pushRoute("/decisions");
+  });
+
+  // Wire Tests tab click
+  container.querySelector(".tab-tests").addEventListener("click", () => {
+    state.view = "tests";
+    document.getElementById("kanbanBoard").classList.add("hidden");
+    document.getElementById("decisionsView").classList.add("hidden");
+    document.getElementById("testsView").classList.remove("hidden");
+    renderSprintTabs();
+    renderTestsView();
+    pushRoute("/tests");
   });
 
   // Keep sprintBtn in sync — "End Sprint" only when a specific sprint tab is selected
@@ -846,6 +878,14 @@ function buildCardHTML(entity, type) {
       </div>
     </div>
   `;
+}
+
+// ─────────────────────────────────────────────────────────── Tests view
+
+async function renderTestsView() {
+  // Task 20 fills in real content.
+  const container = document.getElementById("testsView");
+  container.innerHTML = '<div class="tests-loading">Loading tests…</div>';
 }
 
 // ─────────────────────────────────────────────────────────── Decisions view
