@@ -27,6 +27,10 @@ const state = {
   draggedCard: null,
   view: "board",
   ralphLoops: [],
+  testsCatalogue: null,
+  testsFilter: "all",
+  testsSearch: "",
+  testsSort: "directory",
 };
 
 // ─────────────────────────────────────────────────────────── Router
@@ -904,6 +908,7 @@ async function renderTestsView() {
       '<div class="tests-empty">No catalogue yet. Run <code>./tests/run_tests.sh</code> to generate.</div>';
     return;
   }
+  state.testsCatalogue = cat;
   container.innerHTML = renderTestsHTML(cat);
   bindTestsViewHandlers(container);
 }
@@ -994,19 +999,154 @@ function renderTestRow(test) {
   `;
 }
 
-function renderTestsHTML(cat) {
-  const driftTotal = Object.values(cat.drift_counts || {}).reduce((a, b) => a + b, 0);
-  const counts = cat.counts || {};
+const TESTS_FILTER_LABELS = {
+  all: "All",
+  flagged: "Flagged",
+  orphans: "Orphans",
+  stale: "Stale",
+};
+const TESTS_SORT_LABELS = {
+  directory: "Directory (default)",
+  name: "Name",
+  last_run: "Last run",
+  drift: "Drift severity",
+};
+const DRIFT_SEVERITY_WEIGHT = { broken: 3, suspect: 2, warn: 1 };
+
+function testCategory(test) {
+  const dir = test.directory || "tests";
+  const parts = dir.split("/").filter(Boolean);
+  return parts[1] || parts[0] || "other";
+}
+
+function testIsStale(test) {
+  if (!test.last_run_at) return false;
+  return Date.now() - new Date(test.last_run_at).getTime() > 24 * 60 * 60 * 1000;
+}
+
+function testMaxDriftWeight(test) {
+  return (test.drift || []).reduce((max, d) => {
+    const w = DRIFT_SEVERITY_WEIGHT[d.severity] || 0;
+    return w > max ? w : max;
+  }, 0);
+}
+
+function testMatchesFilter(test, filter) {
+  if (filter === "all") return true;
+  if (filter === "flagged") return (test.drift || []).length > 0;
+  if (filter === "orphans") return (test.drift || []).some((d) => d.code === "orphan_test");
+  if (filter === "stale") return testIsStale(test);
+  return true;
+}
+
+function testMatchesSearch(test, needle) {
+  if (!needle) return true;
+  const q = needle.toLowerCase();
+  const hay = `${test.name || ""} ${test.summary || ""}`.toLowerCase();
+  return hay.includes(q);
+}
+
+function sortTests(tests, sort) {
+  const list = tests.slice();
+  if (sort === "name") {
+    list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  } else if (sort === "last_run") {
+    list.sort((a, b) => {
+      const at = a.last_run_at ? new Date(a.last_run_at).getTime() : 0;
+      const bt = b.last_run_at ? new Date(b.last_run_at).getTime() : 0;
+      return bt - at;
+    });
+  } else if (sort === "drift") {
+    list.sort((a, b) => {
+      const dw = testMaxDriftWeight(b) - testMaxDriftWeight(a);
+      if (dw !== 0) return dw;
+      const dc = (b.drift || []).length - (a.drift || []).length;
+      if (dc !== 0) return dc;
+      return (a.name || "").localeCompare(b.name || "");
+    });
+  } else {
+    list.sort((a, b) => (a.file || a.name || "").localeCompare(b.file || b.name || ""));
+  }
+  return list;
+}
+
+function computeFilteredTests(cat) {
+  const all = cat.tests || [];
+  const filtered = all.filter(
+    (t) => testMatchesFilter(t, state.testsFilter) && testMatchesSearch(t, state.testsSearch),
+  );
+  return filtered;
+}
+
+function renderTestsCountsLine(cat, filtered) {
+  const driftTotal = filtered.reduce((sum, t) => sum + (t.drift || []).length, 0);
+  const passed = filtered.filter((t) => t.status === "passed").length;
+  const failed = filtered.filter((t) => t.status === "failed").length;
+  const skipped = filtered.filter((t) => t.status === "skipped").length;
+  const stalenessNote = cat.summary_stale
+    ? `<span class="tests-staleness">summary.json stale — statuses may be out of date</span>`
+    : "";
+  return `
+    <span class="tests-count tests-count-total"><strong>${filtered.length}</strong> tests</span>
+    <span class="tests-count-sep">·</span>
+    <span class="tests-count tests-count-flagged"><strong>${driftTotal}</strong> flagged</span>
+    ${passed > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-passed"><strong>${passed}</strong> passed</span>` : ""}
+    ${failed > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-failed"><strong>${failed}</strong> failed</span>` : ""}
+    ${skipped > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-skipped"><strong>${skipped}</strong> skipped</span>` : ""}
+    ${stalenessNote}
+  `;
+}
+
+function renderCategoryChips(cat, filtered) {
+  const allCategories = new Set((cat.tests || []).map(testCategory));
+  const order = Array.from(allCategories).sort();
+  const counts = {};
+  for (const cat of order) counts[cat] = 0;
+  for (const t of filtered) {
+    const c = testCategory(t);
+    if (c in counts) counts[c] += 1;
+  }
+  return order
+    .map(
+      (c) =>
+        `<span class="category-chip" data-category="${escAttr(c)}">[${escText(c)}] <strong>${counts[c]}</strong></span>`,
+    )
+    .join("");
+}
+
+function renderFilterChips() {
+  return Object.keys(TESTS_FILTER_LABELS)
+    .map((f) => {
+      const active = f === state.testsFilter ? " filter-chip-active" : "";
+      return `<button type="button" class="filter-chip${active}" data-filter="${escAttr(f)}">${escText(TESTS_FILTER_LABELS[f])}</button>`;
+    })
+    .join("");
+}
+
+function renderSortSelect() {
+  const opts = Object.keys(TESTS_SORT_LABELS)
+    .map((k) => {
+      const sel = k === state.testsSort ? " selected" : "";
+      return `<option value="${escAttr(k)}"${sel}>${escText(TESTS_SORT_LABELS[k])}</option>`;
+    })
+    .join("");
+  return `<select class="tests-sort-select" id="testsSortSelect" aria-label="Sort tests">${opts}</select>`;
+}
+
+function renderTestsGroupsHTML(filtered) {
+  if (filtered.length === 0) {
+    return `<div class="tests-empty-filter">No tests match the current filter.</div>`;
+  }
   const groups = {};
-  for (const t of cat.tests || []) {
+  for (const t of filtered) {
     const dir = t.directory || "tests";
     if (!groups[dir]) groups[dir] = [];
     groups[dir].push(t);
   }
   const dirs = Object.keys(groups).sort();
-  const groupsHTML = dirs
+  return dirs
     .map((dir) => {
-      const rows = groups[dir].map(renderTestRow).join("");
+      const rows = sortTests(groups[dir], state.testsSort).map(renderTestRow).join("");
       return `
         <section class="tests-group">
           <h3 class="tests-group-header"><span class="tests-group-dir">${escText(dir)}</span><span class="tests-group-count">${groups[dir].length}</span></h3>
@@ -1015,31 +1155,70 @@ function renderTestsHTML(cat) {
       `;
     })
     .join("");
-  const stalenessNote = cat.summary_stale
-    ? `<span class="tests-staleness">summary.json stale — statuses may be out of date</span>`
-    : "";
+}
+
+function renderTestsHTML(cat) {
+  const filtered = computeFilteredTests(cat);
   return `
     <div class="tests-view-inner">
       <header class="tests-header">
         <h2 class="tests-title">Test catalogue</h2>
-        <div class="tests-counts">
-          <span class="tests-count tests-count-total"><strong>${counts.total || 0}</strong> tests</span>
-          <span class="tests-count-sep">·</span>
-          <span class="tests-count tests-count-flagged"><strong>${driftTotal}</strong> flagged</span>
-          ${typeof counts.passed === "number" ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-passed"><strong>${counts.passed}</strong> passed</span>` : ""}
-          ${typeof counts.failed === "number" && counts.failed > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-failed"><strong>${counts.failed}</strong> failed</span>` : ""}
-          ${typeof counts.skipped === "number" && counts.skipped > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-skipped"><strong>${counts.skipped}</strong> skipped</span>` : ""}
-          ${stalenessNote}
-        </div>
+        <div class="tests-counts" id="testsCounts">${renderTestsCountsLine(cat, filtered)}</div>
+        <div class="tests-category-chips" id="testsCategoryChips">${renderCategoryChips(cat, filtered)}</div>
       </header>
       ${renderCodebaseDriftSection(cat.codebase_drift)}
-      <div class="tests-list">${groupsHTML}</div>
+      <div class="tests-controls">
+        <input type="search" class="tests-search" id="testsSearch" placeholder="search name or summary…" value="${escAttr(state.testsSearch || "")}" aria-label="Search tests">
+        <div class="tests-filter-chips" role="group" aria-label="Filter tests">${renderFilterChips()}</div>
+        <label class="tests-sort-label">Sort: ${renderSortSelect()}</label>
+      </div>
+      <div class="tests-list" id="testsList">${renderTestsGroupsHTML(filtered)}</div>
     </div>
   `;
 }
 
-function bindTestsViewHandlers(_container) {
-  // MVP: native <details>/<summary> handles row toggle. Task 21 wires filters.
+function applyTestsFilters() {
+  const cat = state.testsCatalogue;
+  if (!cat) return;
+  const filtered = computeFilteredTests(cat);
+  const countsEl = document.getElementById("testsCounts");
+  const chipsEl = document.getElementById("testsCategoryChips");
+  const listEl = document.getElementById("testsList");
+  if (countsEl) countsEl.innerHTML = renderTestsCountsLine(cat, filtered);
+  if (chipsEl) chipsEl.innerHTML = renderCategoryChips(cat, filtered);
+  if (listEl) listEl.innerHTML = renderTestsGroupsHTML(filtered);
+}
+
+function bindTestsViewHandlers(container) {
+  const searchInput = container.querySelector("#testsSearch");
+  if (searchInput) {
+    const onSearch = debounce(() => {
+      state.testsSearch = searchInput.value || "";
+      applyTestsFilters();
+    }, 120);
+    searchInput.addEventListener("input", onSearch);
+  }
+  const chipRow = container.querySelector(".tests-filter-chips");
+  if (chipRow) {
+    chipRow.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-filter]");
+      if (!btn) return;
+      const filter = btn.getAttribute("data-filter");
+      if (!filter || filter === state.testsFilter) return;
+      state.testsFilter = filter;
+      chipRow.querySelectorAll(".filter-chip").forEach((el) => {
+        el.classList.toggle("filter-chip-active", el.getAttribute("data-filter") === filter);
+      });
+      applyTestsFilters();
+    });
+  }
+  const sortSelect = container.querySelector("#testsSortSelect");
+  if (sortSelect) {
+    sortSelect.addEventListener("change", () => {
+      state.testsSort = sortSelect.value;
+      applyTestsFilters();
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────── Decisions view

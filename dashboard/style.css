@@ -1947,6 +1947,117 @@ html, body {
   color: var(--text-muted);
 }
 
+/* Per-category count chips */
+.tests-category-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.category-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
+}
+
+.category-chip strong { color: var(--text-primary); font-weight: 600; }
+
+/* Search / filter / sort controls */
+.tests-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.tests-search {
+  flex: 1 1 200px;
+  min-width: 180px;
+  max-width: 320px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  color: var(--text-primary);
+}
+
+.tests-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tests-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.filter-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 3px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.filter-chip:hover { color: var(--text-primary); }
+
+.filter-chip-active {
+  background: var(--accent);
+  color: var(--bg-deep);
+  border-color: var(--accent);
+}
+
+.tests-sort-label {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.tests-sort-select {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  color: var(--text-primary);
+}
+
+.tests-sort-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tests-empty-filter {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-primary);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
 /* Per-directory test groups */
 .tests-list { display: flex; flex-direction: column; gap: 18px; }
 
