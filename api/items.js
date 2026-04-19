@@ -1,6 +1,8 @@
 import { Router } from 'express';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import * as store from '../lib/store.js';
-import { getConfig, getTypePrefix } from '../lib/config.js';
+import { getConfig, getTypePrefix, resolveDataDir } from '../lib/config.js';
 
 const router = Router();
 
@@ -40,6 +42,17 @@ router.get('/', (req, res) => {
 router.get('/:id', (req, res) => {
   const item = store.get().items.find(i => i.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Not found' });
+  if (item.id && item.id.startsWith('DD-')) {
+    const sidecarPath = join(resolveDataDir(), 'items', `${item.id}.tests.json`);
+    if (existsSync(sidecarPath)) {
+      try {
+        const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+        return res.json({ ...item, tests: sidecar.tests || [] });
+      } catch (err) {
+        console.error(`[items] sidecar read failed for ${item.id}:`, err.message);
+      }
+    }
+  }
   res.json(item);
 });
 
