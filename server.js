@@ -13,6 +13,7 @@ import sprintsRouter from './api/sprints.js';
 import contextRouter from './api/context.js';
 import milestonesRouter from './api/milestones.js';
 import eventsRouter from './api/events.js';
+import testsRouter from './api/tests.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -54,6 +55,7 @@ app.use('/api/sprints', sprintsRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/milestones', milestonesRouter);
 app.use('/api/events', eventsRouter);
+app.use('/api/tests', testsRouter);
 
 // Upload attachment
 const ALLOWED_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp']);
