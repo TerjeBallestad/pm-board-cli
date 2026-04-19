@@ -6,26 +6,34 @@ import { resolveDataDir } from '../lib/config.js';
 
 const router = Router();
 
+function readSidecarTests(id) {
+  const sidecarPath = join(resolveDataDir(), 'designs', `${id}.tests.json`);
+  if (!existsSync(sidecarPath)) return null;
+  try {
+    const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+    return sidecar.tests || [];
+  } catch (err) {
+    console.error(`[designs] sidecar read failed for ${id}:`, err.message);
+    return null;
+  }
+}
+
 // List SDDs
 router.get('/', (req, res) => {
   let designs = store.get().designs;
   if (req.query.sprintId) designs = designs.filter(d => d.sprintId === req.query.sprintId);
-  res.json(designs);
+  res.json(designs.map(d => {
+    const tests = readSidecarTests(d.id);
+    return tests ? { ...d, tests } : d;
+  }));
 });
 
 // Get single SDD
 router.get('/:id', (req, res) => {
   const design = store.get().designs.find(d => d.id === req.params.id);
   if (!design) return res.status(404).json({ error: 'Not found' });
-  const sidecarPath = join(resolveDataDir(), 'designs', `${design.id}.tests.json`);
-  if (existsSync(sidecarPath)) {
-    try {
-      const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
-      return res.json({ ...design, tests: sidecar.tests || [] });
-    } catch (err) {
-      console.error(`[designs] sidecar read failed for ${design.id}:`, err.message);
-    }
-  }
+  const tests = readSidecarTests(design.id);
+  if (tests) return res.json({ ...design, tests });
   res.json(design);
 });
 

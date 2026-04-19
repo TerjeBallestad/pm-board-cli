@@ -6,6 +6,18 @@ import { getConfig, getTypePrefix, resolveDataDir } from '../lib/config.js';
 
 const router = Router();
 
+function readSidecarTests(subdir, id) {
+  const sidecarPath = join(resolveDataDir(), subdir, `${id}.tests.json`);
+  if (!existsSync(sidecarPath)) return null;
+  try {
+    const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+    return sidecar.tests || [];
+  } catch (err) {
+    console.error(`[${subdir}] sidecar read failed for ${id}:`, err.message);
+    return null;
+  }
+}
+
 // List archived items (optional filters: type)
 router.get('/archived', (req, res) => {
   let items = store.getArchive().items;
@@ -35,7 +47,11 @@ router.get('/', (req, res) => {
   if (req.query.stage) items = items.filter(i => i.stage === req.query.stage);
   if (req.query.priority) items = items.filter(i => i.priority === req.query.priority);
   if (req.query.sprintId) items = items.filter(i => i.sprintId === req.query.sprintId);
-  res.json(items);
+  res.json(items.map(i => {
+    if (!i.id || !i.id.startsWith('DD-')) return i;
+    const tests = readSidecarTests('items', i.id);
+    return tests ? { ...i, tests } : i;
+  }));
 });
 
 // Get single item
@@ -43,15 +59,8 @@ router.get('/:id', (req, res) => {
   const item = store.get().items.find(i => i.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Not found' });
   if (item.id && item.id.startsWith('DD-')) {
-    const sidecarPath = join(resolveDataDir(), 'items', `${item.id}.tests.json`);
-    if (existsSync(sidecarPath)) {
-      try {
-        const sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8'));
-        return res.json({ ...item, tests: sidecar.tests || [] });
-      } catch (err) {
-        console.error(`[items] sidecar read failed for ${item.id}:`, err.message);
-      }
-    }
+    const tests = readSidecarTests('items', item.id);
+    if (tests) return res.json({ ...item, tests });
   }
   res.json(item);
 });
