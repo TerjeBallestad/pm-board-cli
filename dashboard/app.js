@@ -882,10 +882,164 @@ function buildCardHTML(entity, type) {
 
 // ─────────────────────────────────────────────────────────── Tests view
 
+const DRIFT_SEVERITY_CLASS = {
+  broken: "broken",
+  suspect: "suspect",
+  warn: "warn",
+};
+
 async function renderTestsView() {
-  // Task 20 fills in real content.
   const container = document.getElementById("testsView");
   container.innerHTML = '<div class="tests-loading">Loading tests…</div>';
+  let cat;
+  try {
+    const res = await fetch("/api/tests");
+    cat = await res.json();
+  } catch (err) {
+    container.innerHTML = `<div class="tests-empty">Failed to load catalogue: ${escText(err.message)}</div>`;
+    return;
+  }
+  if (cat.missing) {
+    container.innerHTML =
+      '<div class="tests-empty">No catalogue yet. Run <code>./tests/run_tests.sh</code> to generate.</div>';
+    return;
+  }
+  container.innerHTML = renderTestsHTML(cat);
+  bindTestsViewHandlers(container);
+}
+
+function formatTestRunTime(iso) {
+  if (!iso) return { text: "never run", stale: false, missing: true };
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const stale = diffMs > 24 * 60 * 60 * 1000;
+  const base = relativeTime(iso);
+  return { text: stale ? `stale — last run ${base}` : base, stale, missing: false };
+}
+
+function renderCodebaseDriftSection(codebaseDrift) {
+  const findings = (codebaseDrift && codebaseDrift.constants_out_of_sync) || [];
+  const count = findings.length;
+  const summary = `<summary class="codebase-drift-summary">Codebase drift (${count} ${count === 1 ? "finding" : "findings"})</summary>`;
+  if (count === 0) {
+    return `<details class="codebase-drift-section">${summary}<div class="codebase-drift-empty">No codebase drift — constants and activity resources are in sync.</div></details>`;
+  }
+  const items = findings
+    .map((f) => {
+      const kind = f.kind || "unknown";
+      const kindLabel = kind === "dangling_constant" ? "dangling constant" : kind === "unregistered_activity" ? "unregistered activity" : escText(kind);
+      const constName = f.constant ? `<code>${escText(f.constant)}</code>` : "";
+      const value = f.value ? `<code>${escText(f.value)}</code>` : "";
+      const tresPath = f.tres_path ? ` <span class="codebase-drift-path">${escText(f.tres_path)}</span>` : "";
+      const label = kind === "dangling_constant"
+        ? `${constName} = ${value} has no matching <code>.tres</code>`
+        : `${value} exists in .tres but no <code>ActivityIds</code> constant${tresPath}`;
+      return `<li class="codebase-drift-item"><span class="codebase-drift-kind codebase-drift-kind-${kind}">${kindLabel}</span> ${label}</li>`;
+    })
+    .join("");
+  return `<details class="codebase-drift-section">${summary}<ul class="codebase-drift-list">${items}</ul></details>`;
+}
+
+function renderDriftChip(d) {
+  const severityClass = DRIFT_SEVERITY_CLASS[d.severity] || "warn";
+  return `<span class="drift-chip drift-chip-${severityClass}" title="${escText(d.severity || "")}">${escText(d.code)}</span>`;
+}
+
+function renderGuardChip(id) {
+  return `<span class="guard-chip">${escText(id)}</span>`;
+}
+
+function renderClaimBullet(c) {
+  const text = escText(c.text || c.method || "");
+  const lqClass = c.lowQuality ? " claim-low-quality" : "";
+  return `<li class="tests-claim${lqClass}">${text}</li>`;
+}
+
+function renderTestRow(test) {
+  const runMeta = formatTestRunTime(test.last_run_at);
+  const statusLabel = test.status || "unknown";
+  const statusClass = `tests-status-${statusLabel}`;
+  const guards = (test.guards || []).map(renderGuardChip).join("");
+  const drift = (test.drift || []).map(renderDriftChip).join("");
+  const claims = (test.claims || []).map(renderClaimBullet).join("");
+  const summaryText = test.summary ? `<p class="tests-summary">${escText(test.summary)}</p>` : "";
+  const uncalled = (test.uncalledSubmethods || []).length > 0
+    ? `<div class="tests-sub-block"><h4>Uncalled methods</h4><ul>${test.uncalledSubmethods.map((m) => `<li><code>${escText(m)}</code></li>`).join("")}</ul></div>`
+    : "";
+  const hardcoded = (test.hardcodedStrings || []).length > 0
+    ? `<div class="tests-sub-block"><h4>Hardcoded activity strings</h4><ul>${test.hardcodedStrings.map((h) => `<li><code>"${escText(h.value)}"</code> → use <code>ActivityIds.${escText(h.constant || "?")}</code></li>`).join("")}</ul></div>`
+    : "";
+  const deadAssets = (test.deadAssetStrings || []).length > 0
+    ? `<div class="tests-sub-block tests-sub-block-bad"><h4>Dead activity strings</h4><ul>${test.deadAssetStrings.map((v) => `<li><code>"${escText(v)}"</code> — not in <code>ActivityIds</code></li>`).join("")}</ul></div>`
+    : "";
+  const runLine = `<div class="tests-runline ${runMeta.stale ? "tests-runline-stale" : ""}">${escText(runMeta.text)}</div>`;
+  const fileLabel = test.file ? `<span class="tests-filepath">${escText(test.file)}</span>` : "";
+  const staleClass = runMeta.stale ? " tests-row-stale" : "";
+  return `
+    <details class="tests-row${staleClass}" data-test="${escText(test.name)}">
+      <summary class="tests-row-summary">
+        <span class="tests-row-status ${statusClass}" title="${escText(statusLabel)}"></span>
+        <span class="tests-row-name">${escText(test.name)}</span>
+        ${fileLabel}
+        <span class="tests-row-chips">${guards}${drift}</span>
+      </summary>
+      <div class="tests-row-body">
+        ${summaryText}
+        ${claims ? `<ul class="tests-claims">${claims}</ul>` : ""}
+        ${hardcoded}
+        ${deadAssets}
+        ${uncalled}
+        ${runLine}
+      </div>
+    </details>
+  `;
+}
+
+function renderTestsHTML(cat) {
+  const driftTotal = Object.values(cat.drift_counts || {}).reduce((a, b) => a + b, 0);
+  const counts = cat.counts || {};
+  const groups = {};
+  for (const t of cat.tests || []) {
+    const dir = t.directory || "tests";
+    if (!groups[dir]) groups[dir] = [];
+    groups[dir].push(t);
+  }
+  const dirs = Object.keys(groups).sort();
+  const groupsHTML = dirs
+    .map((dir) => {
+      const rows = groups[dir].map(renderTestRow).join("");
+      return `
+        <section class="tests-group">
+          <h3 class="tests-group-header"><span class="tests-group-dir">${escText(dir)}</span><span class="tests-group-count">${groups[dir].length}</span></h3>
+          <div class="tests-group-body">${rows}</div>
+        </section>
+      `;
+    })
+    .join("");
+  const stalenessNote = cat.summary_stale
+    ? `<span class="tests-staleness">summary.json stale — statuses may be out of date</span>`
+    : "";
+  return `
+    <div class="tests-view-inner">
+      <header class="tests-header">
+        <h2 class="tests-title">Test catalogue</h2>
+        <div class="tests-counts">
+          <span class="tests-count tests-count-total"><strong>${counts.total || 0}</strong> tests</span>
+          <span class="tests-count-sep">·</span>
+          <span class="tests-count tests-count-flagged"><strong>${driftTotal}</strong> flagged</span>
+          ${typeof counts.passed === "number" ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-passed"><strong>${counts.passed}</strong> passed</span>` : ""}
+          ${typeof counts.failed === "number" && counts.failed > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-failed"><strong>${counts.failed}</strong> failed</span>` : ""}
+          ${typeof counts.skipped === "number" && counts.skipped > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-skipped"><strong>${counts.skipped}</strong> skipped</span>` : ""}
+          ${stalenessNote}
+        </div>
+      </header>
+      ${renderCodebaseDriftSection(cat.codebase_drift)}
+      <div class="tests-list">${groupsHTML}</div>
+    </div>
+  `;
+}
+
+function bindTestsViewHandlers(_container) {
+  // MVP: native <details>/<summary> handles row toggle. Task 21 wires filters.
 }
 
 // ─────────────────────────────────────────────────────────── Decisions view
