@@ -209,6 +209,52 @@ function relativeTime(dateString) {
   return `${years}y ago`;
 }
 
+/**
+ * Render the VERIFIED CLAIMS widget for a DD/SDD detail pane.
+ * `tests` comes from the sidecar embed in /api/items/:id or /api/designs/:id
+ * (may be undefined when no sidecar exists — render empty state).
+ */
+function renderTestsWidget(tests) {
+  const list = Array.isArray(tests) ? tests : [];
+  if (list.length === 0) {
+    return `
+      <div class="detail-section detail-tests">
+        <h3 class="detail-section-title">VERIFIED CLAIMS</h3>
+        <div class="detail-tests-empty">(no claims yet — no tests guard this decision)</div>
+      </div>
+    `;
+  }
+  const testsHTML = list
+    .map((t) => {
+      const claims = Array.isArray(t.claims) ? t.claims : [];
+      const claimsHTML =
+        claims.length > 0
+          ? `<ul class="detail-tests-claims">${claims
+              .map((c) => `<li>${escText(c.text || c.method || "")}</li>`)
+              .join("")}</ul>`
+          : "";
+      const fileLabel = t.file
+        ? `<span class="detail-tests-file">${escText(t.file)}</span>`
+        : "";
+      return `
+        <div class="detail-tests-row">
+          <div class="detail-tests-header">
+            <span class="detail-tests-name">${escText(t.name || "")}</span>
+            ${fileLabel}
+          </div>
+          ${claimsHTML}
+        </div>
+      `;
+    })
+    .join("");
+  return `
+    <div class="detail-section detail-tests">
+      <h3 class="detail-section-title">VERIFIED CLAIMS</h3>
+      ${testsHTML}
+    </div>
+  `;
+}
+
 // ─────────────────────────────────────────────────────────── Image upload helper
 
 /** Attach drag-drop and paste image upload to a textarea. Inserts markdown image syntax. */
@@ -899,6 +945,7 @@ function renderDecisionsView(selectedId) {
       <div class="dd-detail-doc">
         <h2 class="dd-detail-title">${escText(activeItem.title)}</h2>
         <div class="detail-body">${bodyHTML}</div>
+        ${renderTestsWidget(activeItem.tests)}
         ${relatedHTML ? `
           <div class="detail-section">
             <div class="detail-section-title">Related Items</div>
@@ -1574,6 +1621,7 @@ function showDetailOverlay(itemId) {
           </div>
         </div>
       </div>
+      ${item.type === "decision" ? renderTestsWidget(item.tests) : ""}
       <div class="detail-section">
         <div class="detail-section-title">Affected Files</div>
         ${filesHTML}
