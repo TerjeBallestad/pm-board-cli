@@ -1879,6 +1879,7 @@ function showSddDetail(sddId) {
         </div>
       </div>
       <div class="detail-body">${bodyHTML}</div>
+      ${renderTestsWidget(sdd.tests)}
       <div class="detail-section">
         <div class="detail-section-title">Linked Items</div>
         <div id="detailLinked">${linkedHTML}</div>
