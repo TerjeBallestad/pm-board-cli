@@ -15,7 +15,13 @@
     "express": "^5.1.0",
     "yaml": "^2.8.2"
   },
-  "keywords": ["project-management", "cli", "kanban", "agentic", "ai-agents"],
+  "keywords": [
+    "project-management",
+    "cli",
+    "kanban",
+    "agentic",
+    "ai-agents"
+  ],
   "author": "Terje Ballestad",
   "license": "MIT",
   "repository": {
