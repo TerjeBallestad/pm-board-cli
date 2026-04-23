@@ -1,6 +1,6 @@
 {
   "name": "@terjeballestad/pm-board-cli",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Lightweight file-based project management for agentic workflows",
   "main": "server.js",
   "bin": {
