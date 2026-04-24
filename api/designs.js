@@ -66,10 +66,21 @@ router.post('/', async (req, res) => {
   res.status(201).json(design);
 });
 
+// Coerce string-or-array → array for fields that MUST be arrays.
+// Prevents frontend crashes when a caller passes "SB-225" instead of ["SB-225"].
+function coerceArrayField(body, key) {
+  if (body[key] === undefined) return;
+  if (body[key] === '' || body[key] === null) { body[key] = []; return; }
+  if (typeof body[key] === 'string') {
+    body[key] = body[key].split(',').map(s => s.trim()).filter(Boolean);
+  }
+}
+
 // Update SDD
 router.patch('/:id', async (req, res) => {
   const design = store.get().designs.find(d => d.id === req.params.id);
   if (!design) return res.status(404).json({ error: 'Not found' });
+  coerceArrayField(req.body, 'itemIds');
   const allowed = ['title', 'body', 'itemIds', 'stage', 'sprintId'];
   for (const key of allowed) {
     if (req.body[key] !== undefined) design[key] = req.body[key];

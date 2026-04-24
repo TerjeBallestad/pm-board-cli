@@ -186,6 +186,7 @@ function buildPatchBody() {
     if (key === 'sprint') body.sprintId = val;
     else if (key === 'files') body.affectedFiles = val.split(',');
     else if (key === 'items') body.itemIds = val.split(',');
+    else if (key === 'related') body.related = val === '' ? [] : val.split(',');
     else body[key] = val;
   }
   return body;
@@ -424,6 +425,7 @@ Items (SB, DD, DC, GAP, ...):
   --pillar P            Set design pillar
   --sprint SPRINT-NNN   Assign to sprint
   --files f1,f2         Set affected files (comma-separated)
+  --related IDs         Set related IDs (comma-separated, e.g. SDD-060,DD-042)
 
 Designs (SDD):
   --title T             Rename
