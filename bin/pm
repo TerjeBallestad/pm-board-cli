@@ -121,6 +121,58 @@ function printList(items) {
   }
 }
 
+// --- List type resolution ---
+// Canonical list types: 'sdd', 'plan', 'sprint', plus per-config item types
+// (e.g. 'issue', 'decision', 'concern', 'gap'). The resolver accepts prefix
+// codes, labels, singulars, plurals, mixed case — anything an agent might
+// reasonably guess. Only the canonical positional form is documented; the
+// rest "just work."
+const RESERVED_LIST_TYPES = {
+  sdd: 'sdd', sdds: 'sdd', design: 'sdd', designs: 'sdd',
+  plan: 'plan', plans: 'plan',
+  sprint: 'sprint', sprints: 'sprint'
+};
+function buildTypeAliases() {
+  const aliases = { ...RESERVED_LIST_TYPES };
+  const entityTypes = config?.entityTypes || {};
+  for (const [prefix, def] of Object.entries(entityTypes)) {
+    if (['SDD', 'PLAN', 'SPRINT', 'TASK', 'MILESTONE'].includes(prefix)) continue;
+    const label = String(def.label || prefix).toLowerCase();
+    aliases[prefix.toLowerCase()] = label;
+    aliases[label] = label;
+    aliases[label.endsWith('s') ? label : label + 's'] = label;
+  }
+  return aliases;
+}
+function resolveListType(input) {
+  if (!input) return { canonical: null };
+  const aliases = buildTypeAliases();
+  const canonical = aliases[String(input).toLowerCase()];
+  if (!canonical) {
+    const known = [...new Set(Object.values(aliases))].sort().join(', ');
+    process.stderr.write(`Unknown list type "${input}". Known: ${known}\n`);
+    process.exit(1);
+  }
+  return { canonical };
+}
+async function fetchListByType(typeArg) {
+  const { canonical } = resolveListType(typeArg);
+  if (canonical === 'sdd') return api('GET', '/api/designs', undefined, { silent: true });
+  if (canonical === 'plan') {
+    const path = flags.sprint ? `/api/plans?sprintId=${encodeURIComponent(flags.sprint)}` : '/api/plans';
+    return api('GET', path, undefined, { silent: true });
+  }
+  if (canonical === 'sprint') return api('GET', '/api/sprints', undefined, { silent: true });
+  // Items: filter by canonical type label if specified
+  const params = new URLSearchParams();
+  if (canonical) params.set('type', canonical);
+  if (flags.stage) params.set('stage', flags.stage);
+  if (flags.priority) params.set('priority', flags.priority);
+  if (flags.sprint) params.set('sprintId', flags.sprint);
+  const qs = params.toString();
+  return api('GET', `/api/items${qs ? '?' + qs : ''}`, undefined, { silent: true });
+}
+
 // --- ID prefix routing ---
 function routeById(id) {
   const upper = id.toUpperCase();
@@ -247,9 +299,11 @@ Setup:
 Commands:
   health                         Server health check
   get <id>                       Get item by ID
-  list [--type T] [--stage S] [--priority P] [--sprint ID] [--limit N] [--all] [--json]
-                                 List items (terse: ID + title, sorted oldest→newest,
-                                 default 20; --json for raw)
+  list [<type>] [--stage S] [--priority P] [--sprint ID] [--limit N] [--all] [--json]
+                                 List entities — terse "ID  title", sorted
+                                 oldest→newest, default 20. <type> is one of:
+                                 sdd, plan, sprint, issue, decision, concern, gap.
+                                 Omit <type> to list all items.
   create <type> "title" [--priority P] [--body B] [--pillar P] [--sprint ID] [--files f1,f2]
                                  Create a new item
   patch <id> [--key value ...]   Update any field on an item/design/plan
@@ -273,13 +327,9 @@ Shorthands (get by ID or create):
   sdd [<id>|"title"]             Get or create SDD [--body B] [--items IDs] [--sprint ID]
 
 SDD:
-  sdds [--limit N] [--all] [--json]
-                                 List SDDs (terse, default 20)
   sdd create "title" [--body B] [--items IDs] [--sprint SPRINT-NNN]
 
 Plan / Task:
-  plans [--limit N] [--all] [--json]
-                                 List plans (terse, default 20)
   plan <id>                      Get plan by ID
   plan create < plan.json        Create plan from JSON on stdin
   next-task <plan-id>            Get next unblocked task for a plan
@@ -291,8 +341,6 @@ Plan / Task:
   plan-update <plan-id> [--tasks @file.json] [--title T] [--stage S]
 
 Sprint:
-  sprints [--limit N] [--all] [--json]
-                                 List sprints (terse, default 20)
   sprint [id]                    Get sprint detail (default: first active sprint)
   sprint create "name" [--body "problem statement"]
                                  Create a new sprint (status: active)
@@ -542,13 +590,10 @@ async function main() {
     }
 
     case 'list': {
-      const params = new URLSearchParams();
-      if (flags.type) params.set('type', flags.type);
-      if (flags.stage) params.set('stage', flags.stage);
-      if (flags.priority) params.set('priority', flags.priority);
-      if (flags.sprint) params.set('sprintId', flags.sprint);
-      const qs = params.toString();
-      const items = await api('GET', `/api/items${qs ? '?' + qs : ''}`, undefined, { silent: true });
+      // Canonical: pm list [<type>] [filters]
+      // Type comes from positional[0] or --type flag (back-compat).
+      const typeArg = positional[0] || flags.type;
+      const items = await fetchListByType(typeArg);
       printList(items);
       break;
     }
@@ -728,22 +773,13 @@ async function main() {
       break;
     }
 
+    // Undocumented aliases routed through the unified list handler.
     case 'sdds':
-    case 'designs': {
-      const designs = await api('GET', '/api/designs', undefined, { silent: true });
-      printList(designs);
-      break;
-    }
-
-    case 'plans': {
-      const plans = await api('GET', '/api/plans', undefined, { silent: true });
-      printList(plans);
-      break;
-    }
-
+    case 'designs':
+    case 'plans':
     case 'sprints': {
-      const sprints = await api('GET', '/api/sprints', undefined, { silent: true });
-      printList(sprints);
+      const items = await fetchListByType(subcmd);
+      printList(items);
       break;
     }
 
