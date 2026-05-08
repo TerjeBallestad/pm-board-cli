@@ -81,6 +81,46 @@ async function api(method, path, body, { silent = false } = {}) {
   }
 }
 
+// --- List formatter ---
+// Terse "ID  title" output sorted oldest→newest so the most recent items
+// land at the bottom (closest to the prompt, survive tail-truncation).
+// --json prints raw unsorted JSON (back-compat for scripts).
+// Default limit 20; --limit N or --all override.
+const LIST_DEFAULT_LIMIT = 20;
+function printList(items) {
+  if (flags.json === 'true') {
+    process.stdout.write(JSON.stringify(items, null, 2) + '\n');
+    return;
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    process.stdout.write('(none)\n');
+    return;
+  }
+  const sortKey = (it) => it.updatedAt || it.createdAt || '';
+  const sorted = [...items].sort((a, b) => {
+    const av = sortKey(a);
+    const bv = sortKey(b);
+    return av < bv ? -1 : av > bv ? 1 : 0;
+  });
+  const all = flags.all === 'true';
+  const limit = flags.limit ? parseInt(flags.limit, 10) : LIST_DEFAULT_LIMIT;
+  let display = sorted;
+  let hidden = 0;
+  if (!all && Number.isFinite(limit) && limit > 0 && sorted.length > limit) {
+    hidden = sorted.length - limit;
+    display = sorted.slice(-limit);
+  }
+  if (hidden > 0) {
+    process.stdout.write(`… ${hidden} older hidden (use --all or --limit N)\n`);
+  }
+  const idWidth = Math.max(...display.map(it => String(it.id || '').length));
+  for (const it of display) {
+    const id = String(it.id || '').padEnd(idWidth);
+    const title = it.title || it.name || '(untitled)';
+    process.stdout.write(`${id}  ${title}\n`);
+  }
+}
+
 // --- ID prefix routing ---
 function routeById(id) {
   const upper = id.toUpperCase();
@@ -207,8 +247,9 @@ Setup:
 Commands:
   health                         Server health check
   get <id>                       Get item by ID
-  list [--type T] [--stage S] [--priority P] [--sprint ID]
-                                 List items with optional filters
+  list [--type T] [--stage S] [--priority P] [--sprint ID] [--limit N] [--all] [--json]
+                                 List items (terse: ID + title, sorted oldest→newest,
+                                 default 20; --json for raw)
   create <type> "title" [--priority P] [--body B] [--pillar P] [--sprint ID] [--files f1,f2]
                                  Create a new item
   patch <id> [--key value ...]   Update any field on an item/design/plan
@@ -232,11 +273,13 @@ Shorthands (get by ID or create):
   sdd [<id>|"title"]             Get or create SDD [--body B] [--items IDs] [--sprint ID]
 
 SDD:
-  sdds                           List all SDDs
+  sdds [--limit N] [--all] [--json]
+                                 List SDDs (terse, default 20)
   sdd create "title" [--body B] [--items IDs] [--sprint SPRINT-NNN]
 
 Plan / Task:
-  plans                          List all plans
+  plans [--limit N] [--all] [--json]
+                                 List plans (terse, default 20)
   plan <id>                      Get plan by ID
   plan create < plan.json        Create plan from JSON on stdin
   next-task <plan-id>            Get next unblocked task for a plan
@@ -248,7 +291,8 @@ Plan / Task:
   plan-update <plan-id> [--tasks @file.json] [--title T] [--stage S]
 
 Sprint:
-  sprints                        List all sprints
+  sprints [--limit N] [--all] [--json]
+                                 List sprints (terse, default 20)
   sprint [id]                    Get sprint detail (default: first active sprint)
   sprint create "name" [--body "problem statement"]
                                  Create a new sprint (status: active)
@@ -504,7 +548,8 @@ async function main() {
       if (flags.priority) params.set('priority', flags.priority);
       if (flags.sprint) params.set('sprintId', flags.sprint);
       const qs = params.toString();
-      await api('GET', `/api/items${qs ? '?' + qs : ''}`);
+      const items = await api('GET', `/api/items${qs ? '?' + qs : ''}`, undefined, { silent: true });
+      printList(items);
       break;
     }
 
@@ -684,17 +729,23 @@ async function main() {
     }
 
     case 'sdds':
-    case 'designs':
-      await api('GET', '/api/designs');
+    case 'designs': {
+      const designs = await api('GET', '/api/designs', undefined, { silent: true });
+      printList(designs);
       break;
+    }
 
-    case 'plans':
-      await api('GET', '/api/plans');
+    case 'plans': {
+      const plans = await api('GET', '/api/plans', undefined, { silent: true });
+      printList(plans);
       break;
+    }
 
-    case 'sprints':
-      await api('GET', '/api/sprints');
+    case 'sprints': {
+      const sprints = await api('GET', '/api/sprints', undefined, { silent: true });
+      printList(sprints);
       break;
+    }
 
     case 'sprint': {
       const action = positional[0];
