@@ -67,6 +67,70 @@ test('PATCH rejects unknown stage', async (t) => {
   assert.equal(res.status, 400);
 });
 
+test('PATCH stage→done sets doneAt timestamp', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const created = await request(app).post('/api/items').send({ type: 'issue', title: 'x' });
+  assert.equal(created.body.doneAt, undefined);
+  const done = await request(app).patch(`/api/items/${created.body.id}`).send({ stage: 'done' });
+  assert.ok(done.body.doneAt);
+  // Re-patching done shouldn't reset doneAt
+  const before = done.body.doneAt;
+  await new Promise(r => setTimeout(r, 5));
+  const repatched = await request(app).patch(`/api/items/${created.body.id}`).send({ stage: 'done', title: 'renamed' });
+  assert.equal(repatched.body.doneAt, before);
+});
+
+test('POST comment appends and bumps updatedAt', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const created = await request(app).post('/api/items').send({ type: 'issue', title: 'x' });
+  const before = created.body.updatedAt;
+  await new Promise(r => setTimeout(r, 5));
+  const c = await request(app).post(`/api/items/${created.body.id}/comments`).send({ author: 'tester', text: 'hi' });
+  assert.equal(c.status, 201);
+  assert.equal(c.body.text, 'hi');
+  assert.equal(c.body.author, 'tester');
+
+  const refreshed = await request(app).get(`/api/items/${created.body.id}`);
+  assert.equal(refreshed.body.comments.length, 1);
+  assert.notEqual(refreshed.body.updatedAt, before);
+});
+
+test('POST comment requires text', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const created = await request(app).post('/api/items').send({ type: 'issue', title: 'x' });
+  const res = await request(app).post(`/api/items/${created.body.id}/comments`).send({ author: 'a' });
+  assert.equal(res.status, 400);
+});
+
+test('sweep archives done items older than cutoff', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const fresh = await request(app).post('/api/items').send({ type: 'issue', title: 'fresh' });
+  const stale = await request(app).post('/api/items').send({ type: 'issue', title: 'stale' });
+  await request(app).patch(`/api/items/${fresh.body.id}`).send({ stage: 'done' });
+  await request(app).patch(`/api/items/${stale.body.id}`).send({ stage: 'done' });
+
+  // Sweep with 0 days → both eligible; with very large minAge → none.
+  const noneSwept = await request(app).post('/api/items/archive/sweep').send({ days: 365 });
+  assert.equal(noneSwept.body.archived, 0);
+
+  const swept = await request(app).post('/api/items/archive/sweep').send({ days: 0 });
+  assert.equal(swept.body.archived, 2);
+  assert.deepEqual(swept.body.ids.sort(), [fresh.body.id, stale.body.id].sort());
+});
+
+test('sweep skips decisions even when done', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const decision = await request(app).post('/api/items').send({ type: 'decision', title: 'd' });
+  await request(app).patch(`/api/items/${decision.body.id}`).send({ stage: 'done' });
+  const swept = await request(app).post('/api/items/archive/sweep').send({ days: 0 });
+  assert.equal(swept.body.archived, 0);
+});
+
 test('archive moves item out of active list', async (t) => {
   const { app, cleanup } = await setupTestApp();
   t.after(cleanup);
