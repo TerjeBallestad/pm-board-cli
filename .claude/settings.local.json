@@ -4,7 +4,8 @@
       "Bash(curl -s http://localhost:3333/api/health)",
       "Bash(cd /Users/godstemning/dev/lifelines)",
       "Bash(ls /Users/godstemning/dev/lifelines/pm.config.json)",
-      "Bash(node /Users/godstemning/dev/pm-board-cli/bin/pm sprints)"
+      "Bash(npm test *)",
+      "Bash(git *)"
     ]
   }
 }
