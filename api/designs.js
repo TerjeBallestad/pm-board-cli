@@ -18,30 +18,33 @@ function readSidecarTests(id) {
   }
 }
 
-// List SDDs
-router.get('/', (req, res) => {
+// Handlers are exported plain (req,res) callbacks. They touch only
+// req.{body,query,params} and res.{status,json}, so the in-process dispatch
+// layer (lib/dispatch.js) can call them with a trivial mock req/res — the same
+// code runs whether the caller is Express or the serverless CLI.
+
+export const listDesigns = (req, res) => {
   let designs = store.get().designs;
   if (req.query.sprintId) designs = designs.filter(d => d.sprintId === req.query.sprintId);
   res.json(designs.map(d => {
     const tests = readSidecarTests(d.id);
     return tests ? { ...d, tests } : d;
   }));
-});
+};
 
-// Get single SDD
-router.get('/:id', (req, res) => {
+export const getDesign = (req, res) => {
   const design = store.get().designs.find(d => d.id === req.params.id);
   if (!design) return res.status(404).json({ error: 'Not found' });
   const tests = readSidecarTests(design.id);
   if (tests) return res.json({ ...design, tests });
   res.json(design);
-});
+};
 
-// Create SDD (links items, moves them to 'sdd' stage)
-router.post('/', async (req, res) => {
+export const createDesign = (req, res) => {
   const { title, body, itemIds, sprintId } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
   const id = store.nextId('SDD');
+  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const design = {
     id, title,
@@ -64,10 +67,9 @@ router.post('/', async (req, res) => {
   data.designs.push(design);
   store.writeEntity('designs', id, design);
   res.status(201).json(design);
-});
+};
 
 // Coerce string-or-array → array for fields that MUST be arrays.
-// Prevents frontend crashes when a caller passes "SB-225" instead of ["SB-225"].
 function coerceArrayField(body, key) {
   if (body[key] === undefined) return;
   if (body[key] === '' || body[key] === null) { body[key] = []; return; }
@@ -76,8 +78,7 @@ function coerceArrayField(body, key) {
   }
 }
 
-// Update SDD
-router.patch('/:id', async (req, res) => {
+export const patchDesign = (req, res) => {
   const design = store.get().designs.find(d => d.id === req.params.id);
   if (!design) return res.status(404).json({ error: 'Not found' });
   coerceArrayField(req.body, 'itemIds');
@@ -88,10 +89,9 @@ router.patch('/:id', async (req, res) => {
   design.updatedAt = new Date().toISOString();
   store.writeEntity('designs', design.id, design);
   res.json(design);
-});
+};
 
-// Add comment to SDD
-router.post('/:id/comments', async (req, res) => {
+export const addDesignComment = (req, res) => {
   const design = store.get().designs.find(d => d.id === req.params.id);
   if (!design) return res.status(404).json({ error: 'Not found' });
   const { author, text } = req.body;
@@ -106,6 +106,12 @@ router.post('/:id/comments', async (req, res) => {
   design.updatedAt = new Date().toISOString();
   store.writeEntity('designs', design.id, design);
   res.status(201).json(comment);
-});
+};
+
+router.get('/', listDesigns);
+router.get('/:id', getDesign);
+router.post('/', createDesign);
+router.patch('/:id', patchDesign);
+router.post('/:id/comments', addDesignComment);
 
 export default router;

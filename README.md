@@ -37,6 +37,23 @@ pm serve
 
 `pm init` creates a `pm.config.json`, a `.pm/data/` directory for artifacts, and a `.pm/.gitignore` to exclude runtime files (`pm.pid`, `pm.log`). The data directory stores all PM artifacts as git-trackable files (YAML frontmatter markdown for items/SDDs, JSON for plans/sprints).
 
+## Serverless by default
+
+As of 0.2.0 the CLI runs **in-process against the data files** — no server required. `pm serve` is only needed for the **dashboard** (the web UI). This makes the data files the single source of truth:
+
+- The CLI, your text editor (e.g. resolving a merge conflict by hand), and `git pull` all write the same files. No daemon holds a divergent in-memory copy.
+- IDs are derived from the highest id present on disk (`max+1`), not a stored counter — so they survive branching, merging, and machine switches without the counter drifting and overwriting a record.
+- A running dashboard re-reads disk on every request, so it never shows stale data after a CLI write or a `git pull`.
+
+To target a server instead (e.g. a single shared instance over Tailscale), set `PM_URL` or pass `--server`:
+
+```bash
+PM_URL=http://my-host:3333 pm list        # use a remote server
+pm list --server                           # use the local dashboard server
+```
+
+> **Concurrency note:** sequential ids can still collide if two machines create the *same* entity type while offline and diverged. That is a separate, deliberately deferred problem; at merge time it shows up as two files with the same id — detectable, not a silent overwrite.
+
 ## CLI Reference
 
 ### Server Lifecycle

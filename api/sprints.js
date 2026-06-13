@@ -4,13 +4,11 @@ import { getConfig, buildQmdCommand } from '../lib/config.js';
 
 const router = Router();
 
-// List sprints
-router.get('/', (req, res) => {
+export const listSprints = (req, res) => {
   res.json(store.get().sprints);
-});
+};
 
-// Get single sprint (include related items, SDDs, plans)
-router.get('/:id', (req, res) => {
+export const getSprint = (req, res) => {
   const data = store.get();
   const sprint = data.sprints.find(s => s.id === req.params.id);
   if (!sprint) return res.status(404).json({ error: 'Not found' });
@@ -18,13 +16,13 @@ router.get('/:id', (req, res) => {
   const designs = data.designs.filter(d => d.sprintId === sprint.id);
   const plans = data.plans.filter(p => p.sprintId === sprint.id);
   res.json({ ...sprint, items, designs, plans });
-});
+};
 
-// Create sprint
-router.post('/', async (req, res) => {
+export const createSprint = (req, res) => {
   const { name, problemStatement } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const id = store.nextId('SPRINT');
+  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const sprint = {
     id, name,
@@ -36,10 +34,9 @@ router.post('/', async (req, res) => {
   store.get().sprints.push(sprint);
   store.writeEntity('sprints', id, sprint);
   res.status(201).json(sprint);
-});
+};
 
-// Update sprint (end sprint, rename, etc.)
-router.patch('/:id', async (req, res) => {
+export const patchSprint = (req, res) => {
   const sprint = store.get().sprints.find(s => s.id === req.params.id);
   if (!sprint) return res.status(404).json({ error: 'Not found' });
   const allowed = ['name', 'problemStatement', 'status'];
@@ -53,15 +50,15 @@ router.patch('/:id', async (req, res) => {
       if (item.sprintId === sprint.id && item.stage !== 'done') {
         item.stage = 'done';
         item.doneAt = now;
+        store.writeEntity('items', item.id, item);
       }
     }
   }
   store.writeEntity('sprints', sprint.id, sprint);
   res.json(sprint);
-});
+};
 
-// Suggest items for a sprint based on problem statement
-router.post('/:id/suggest', async (req, res) => {
+export const suggestSprintItems = (req, res) => {
   const data = store.get();
   const sprint = data.sprints.find(s => s.id === req.params.id);
   if (!sprint) return res.status(404).json({ error: 'Not found' });
@@ -75,10 +72,9 @@ router.post('/:id/suggest', async (req, res) => {
   }).filter(s => s.score > 0).sort((a, b) => b.score - a.score);
 
   res.json(scored.slice(0, 10).map(s => ({ ...s.item, relevanceScore: s.score })));
-});
+};
 
-// Generate sprint exploration dossier
-router.post('/:id/explore', async (req, res) => {
+export const exploreSprint = (req, res) => {
   const data = store.get();
   const config = getConfig();
   const sprint = data.sprints.find(s => s.id === req.params.id);
@@ -94,7 +90,6 @@ router.post('/:id/explore', async (req, res) => {
     doc += `## Problem Statement\n\n${sprint.problemStatement}\n\n`;
   }
 
-  // Items grouped by type
   const byType = {};
   for (const item of items) {
     const t = item.type || 'issue';
@@ -137,7 +132,6 @@ router.post('/:id/explore', async (req, res) => {
     }
   }
 
-  // Aggregated affected files
   const allFiles = new Set();
   for (const item of items) {
     for (const f of item.affectedFiles || []) allFiles.add(f);
@@ -150,7 +144,6 @@ router.post('/:id/explore', async (req, res) => {
     doc += [...allFiles].sort().map(f => `- \`${f}\``).join('\n') + '\n\n';
   }
 
-  // Suggested related items
   const words = (sprint.problemStatement || '').toLowerCase().split(/\s+/).filter(w => w.length > 3);
   if (words.length) {
     const unassigned = data.items.filter(i => !i.sprintId && i.stage !== 'done');
@@ -168,7 +161,6 @@ router.post('/:id/explore', async (req, res) => {
     }
   }
 
-  // Knowledge base query suggestions (config-driven)
   const topics = [sprint.name, sprint.problemStatement, ...items.map(i => i.title)].filter(Boolean);
   const uniqueTopics = [...new Set(topics.map(t => t.toLowerCase().trim()))].filter(Boolean).slice(0, 5);
   if (uniqueTopics.length && config.knowledgeBase?.command) {
@@ -181,10 +173,9 @@ router.post('/:id/explore', async (req, res) => {
   }
 
   res.json({ sprint: sprint.id, dossier: doc });
-});
+};
 
-// Add items to sprint
-router.post('/:id/items', async (req, res) => {
+export const addSprintItems = (req, res) => {
   const data = store.get();
   const sprint = data.sprints.find(s => s.id === req.params.id);
   if (!sprint) return res.status(404).json({ error: 'Not found' });
@@ -200,6 +191,14 @@ router.post('/:id/items', async (req, res) => {
     }
   }
   res.json({ added: count });
-});
+};
+
+router.get('/', listSprints);
+router.get('/:id', getSprint);
+router.post('/', createSprint);
+router.patch('/:id', patchSprint);
+router.post('/:id/suggest', suggestSprintItems);
+router.post('/:id/explore', exploreSprint);
+router.post('/:id/items', addSprintItems);
 
 export default router;

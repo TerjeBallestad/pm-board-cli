@@ -18,30 +18,38 @@ function readSidecarTests(subdir, id) {
   }
 }
 
-// List archived items (optional filters: type)
-router.get('/archived', (req, res) => {
+// Coerce string-or-array → array for fields that MUST be arrays.
+function coerceArrayField(body, key) {
+  if (body[key] === undefined) return;
+  if (body[key] === '' || body[key] === null) { body[key] = []; return; }
+  if (typeof body[key] === 'string') {
+    body[key] = body[key].split(',').map(s => s.trim()).filter(Boolean);
+  }
+}
+
+// Handlers are plain (req,res) callbacks reusable by both Express and the
+// serverless dispatch layer (lib/dispatch.js).
+
+export const listArchived = (req, res) => {
   let items = store.getArchive().items;
   if (req.query.type) items = items.filter(i => i.type === req.query.type);
   res.json(items);
-});
+};
 
-// Sweep done items older than N days into archive
-router.post('/archive/sweep', async (req, res) => {
+export const sweepItems = (req, res) => {
   const days = req.body?.days ?? 1;
   const moved = store.sweepDoneItems(days);
   res.json({ archived: moved.length, ids: moved });
-});
+};
 
-// Archive specific items by ID
-router.post('/archive', async (req, res) => {
+export const archiveItems = (req, res) => {
   const { ids } = req.body;
   if (!ids || !Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
   const moved = store.archiveItems(ids);
   res.json({ archived: moved.length, ids: moved });
-});
+};
 
-// List items (optional filters: type, stage, priority, sprintId)
-router.get('/', (req, res) => {
+export const listItems = (req, res) => {
   let items = store.get().items;
   if (req.query.type) items = items.filter(i => i.type === req.query.type);
   if (req.query.stage) items = items.filter(i => i.stage === req.query.stage);
@@ -52,10 +60,9 @@ router.get('/', (req, res) => {
     const tests = readSidecarTests('items', i.id);
     return tests ? { ...i, tests } : i;
   }));
-});
+};
 
-// Get single item
-router.get('/:id', (req, res) => {
+export const getItem = (req, res) => {
   const item = store.get().items.find(i => i.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Not found' });
   if (item.id && item.id.startsWith('DD-')) {
@@ -63,10 +70,9 @@ router.get('/:id', (req, res) => {
     if (tests) return res.json({ ...item, tests });
   }
   res.json(item);
-});
+};
 
-// Create item
-router.post('/', async (req, res) => {
+export const createItem = (req, res) => {
   const { type, title, priority, body, pillar, related, affectedFiles, stage } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
   const config = getConfig();
@@ -74,6 +80,7 @@ router.post('/', async (req, res) => {
   const typePrefix = getTypePrefix();
   const prefix = typePrefix[type] || Object.keys(config.entityTypes)[0] || 'SB';
   const id = store.nextId(prefix);
+  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const item = {
     id, type: type || 'issue', title,
@@ -90,20 +97,9 @@ router.post('/', async (req, res) => {
   store.get().items.push(item);
   store.writeEntity('items', id, item);
   res.status(201).json(item);
-});
+};
 
-// Coerce string-or-array → array for fields that MUST be arrays.
-// Prevents frontend crashes when a caller passes "SDD-060" instead of ["SDD-060"].
-function coerceArrayField(body, key) {
-  if (body[key] === undefined) return;
-  if (body[key] === '' || body[key] === null) { body[key] = []; return; }
-  if (typeof body[key] === 'string') {
-    body[key] = body[key].split(',').map(s => s.trim()).filter(Boolean);
-  }
-}
-
-// Update item
-router.patch('/:id', async (req, res) => {
+export const patchItem = (req, res) => {
   const data = store.get();
   const item = data.items.find(i => i.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Not found' });
@@ -124,20 +120,18 @@ router.patch('/:id', async (req, res) => {
   item.updatedAt = new Date().toISOString();
   store.writeEntity('items', item.id, item);
   res.json(item);
-});
+};
 
-// Delete item
-router.delete('/:id', async (req, res) => {
+export const deleteItem = (req, res) => {
   const data = store.get();
   const idx = data.items.findIndex(i => i.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
   data.items.splice(idx, 1);
   store.deleteEntity('items', req.params.id);
   res.status(204).end();
-});
+};
 
-// Add comment to item
-router.post('/:id/comments', async (req, res) => {
+export const addItemComment = (req, res) => {
   const item = store.get().items.find(i => i.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Not found' });
   const { author, text } = req.body;
@@ -152,6 +146,16 @@ router.post('/:id/comments', async (req, res) => {
   item.updatedAt = new Date().toISOString();
   store.writeEntity('items', item.id, item);
   res.status(201).json(comment);
-});
+};
+
+router.get('/archived', listArchived);
+router.post('/archive/sweep', sweepItems);
+router.post('/archive', archiveItems);
+router.get('/', listItems);
+router.get('/:id', getItem);
+router.post('/', createItem);
+router.patch('/:id', patchItem);
+router.delete('/:id', deleteItem);
+router.post('/:id/comments', addItemComment);
 
 export default router;

@@ -11,7 +11,7 @@ import {
 const router = Router();
 
 // QMD proxy (config-driven)
-router.get('/qmd', (req, res) => {
+export const qmdQuery = (req, res) => {
   const q = req.query.q;
   if (!q) return res.status(400).json({ error: 'q required' });
   const cmd = buildQmdCommand(q);
@@ -22,10 +22,10 @@ router.get('/qmd', (req, res) => {
   } catch (e) {
     res.json({ query: q, result: '', error: e.message });
   }
-});
+};
 
 // Generate scoped prompt for any entity
-router.post('/prompt', async (req, res) => {
+export const generatePrompt = (req, res) => {
   const { entityType, entityId, includeQmd } = req.body;
   const data = store.get();
   const config = getConfig();
@@ -103,10 +103,10 @@ router.post('/prompt', async (req, res) => {
   }
 
   res.json({ prompt, entityType, entityId });
-});
+};
 
 // Generate review prompt for SDDs or Plans
-router.post('/review', async (req, res) => {
+export const generateReview = (req, res) => {
   const { entityType, entityId } = req.body;
   const data = store.get();
   const config = getConfig();
@@ -175,7 +175,7 @@ router.post('/review', async (req, res) => {
   }
 
   res.json({ prompt, entityType, entityId });
-});
+};
 
 // --- QMD query extraction ---
 
@@ -237,5 +237,9 @@ function buildSddReviewFallback(sdd, data) {
 function buildPlanReviewFallback(plan, data) {
   return `# Plan Review: ${plan.id} — ${plan.title}\n\n(No review template found. Install default templates.)`;
 }
+
+router.get('/qmd', qmdQuery);
+router.post('/prompt', generatePrompt);
+router.post('/review', generateReview);
 
 export default router;

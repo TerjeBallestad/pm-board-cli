@@ -3,20 +3,6 @@ import * as store from '../lib/store.js';
 
 const router = Router();
 
-// List plans
-router.get('/', (req, res) => {
-  let plans = store.get().plans;
-  if (req.query.sprintId) plans = plans.filter(p => p.sprintId === req.query.sprintId);
-  res.json(plans);
-});
-
-// Get single plan
-router.get('/:id', (req, res) => {
-  const plan = store.get().plans.find(p => p.id === req.params.id);
-  if (!plan) return res.status(404).json({ error: 'Not found' });
-  res.json(plan);
-});
-
 // Resolve ordinal blockedBy refs (e.g. "TASK-1" meaning task index 0) to real TASK-NNN IDs
 function resolveBlockedBy(tasks) {
   const ordinalMap = {};
@@ -26,11 +12,23 @@ function resolveBlockedBy(tasks) {
   }
 }
 
-// Create plan with structured tasks
-router.post('/', async (req, res) => {
+export const listPlans = (req, res) => {
+  let plans = store.get().plans;
+  if (req.query.sprintId) plans = plans.filter(p => p.sprintId === req.query.sprintId);
+  res.json(plans);
+};
+
+export const getPlan = (req, res) => {
+  const plan = store.get().plans.find(p => p.id === req.params.id);
+  if (!plan) return res.status(404).json({ error: 'Not found' });
+  res.json(plan);
+};
+
+export const createPlan = (req, res) => {
   const { title, sddId, sprintId, context: ctx, tasks } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
   const id = store.nextId('PLAN');
+  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const plan = {
     id, title,
@@ -38,8 +36,75 @@ router.post('/', async (req, res) => {
     stage: 'planned',
     sprintId: sprintId || null,
     context: ctx || { setupNotes: '', relevantFiles: [], designDecisions: '' },
-    tasks: (tasks || []).map(t => ({
-      id: store.nextId('TASK'),
+    tasks: (() => {
+      const ids = [];
+      return (tasks || []).map(t => {
+        const taskId = store.nextId('TASK', ids);
+        ids.push(taskId);
+        return {
+          id: taskId,
+          title: t.title || '',
+          description: t.description || '',
+          steps: t.steps || [],
+          verification: t.verification || '',
+          blockedBy: t.blockedBy || [],
+          passes: false,
+          status: 'pending',
+          progressNotes: []
+        };
+      });
+    })(),
+    comments: [],
+    createdAt: now, updatedAt: now
+  };
+  resolveBlockedBy(plan.tasks);
+  store.get().plans.push(plan);
+  store.writeEntity('plans', id, plan);
+  res.status(201).json(plan);
+};
+
+export const patchPlan = (req, res) => {
+  const plan = store.get().plans.find(p => p.id === req.params.id);
+  if (!plan) return res.status(404).json({ error: 'Not found' });
+  const allowed = ['title', 'sddId', 'stage', 'sprintId', 'context'];
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) plan[key] = req.body[key];
+  }
+  if (Array.isArray(req.body.tasks)) {
+    const ids = [];
+    plan.tasks = req.body.tasks.map(t => {
+      const taskId = t.id || store.nextId('TASK', ids);
+      ids.push(taskId);
+      return {
+        id: taskId,
+        title: t.title || '',
+        description: t.description || '',
+        steps: t.steps || [],
+        verification: t.verification || '',
+        blockedBy: t.blockedBy || [],
+        passes: t.passes || false,
+        status: t.status || 'pending',
+        progressNotes: t.progressNotes || []
+      };
+    });
+    resolveBlockedBy(plan.tasks);
+  }
+  plan.updatedAt = new Date().toISOString();
+  store.writeEntity('plans', plan.id, plan);
+  res.json(plan);
+};
+
+export const addPlanTasks = (req, res) => {
+  const plan = store.get().plans.find(p => p.id === req.params.id);
+  if (!plan) return res.status(404).json({ error: 'Not found' });
+  const { tasks } = req.body;
+  if (!Array.isArray(tasks) || tasks.length === 0) return res.status(400).json({ error: 'tasks array required' });
+  const ids = [];
+  const newTasks = tasks.map(t => {
+    const taskId = store.nextId('TASK', ids);
+    ids.push(taskId);
+    return {
+      id: taskId,
       title: t.title || '',
       description: t.description || '',
       steps: t.steps || [],
@@ -48,71 +113,17 @@ router.post('/', async (req, res) => {
       passes: false,
       status: 'pending',
       progressNotes: []
-    })),
-    comments: [],
-    createdAt: now, updatedAt: now
-  };
-  resolveBlockedBy(plan.tasks);
-  store.get().plans.push(plan);
-  store.writeEntity('plans', id, plan);
-  res.status(201).json(plan);
-});
-
-// Update plan (including full task replacement)
-router.patch('/:id', async (req, res) => {
-  const plan = store.get().plans.find(p => p.id === req.params.id);
-  if (!plan) return res.status(404).json({ error: 'Not found' });
-  const allowed = ['title', 'sddId', 'stage', 'sprintId', 'context'];
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) plan[key] = req.body[key];
-  }
-  if (Array.isArray(req.body.tasks)) {
-    plan.tasks = req.body.tasks.map(t => ({
-      id: t.id || store.nextId('TASK'),
-      title: t.title || '',
-      description: t.description || '',
-      steps: t.steps || [],
-      verification: t.verification || '',
-      blockedBy: t.blockedBy || [],
-      passes: t.passes || false,
-      status: t.status || 'pending',
-      progressNotes: t.progressNotes || []
-    }));
-    resolveBlockedBy(plan.tasks);
-  }
-  plan.updatedAt = new Date().toISOString();
-  store.writeEntity('plans', plan.id, plan);
-  res.json(plan);
-});
-
-// Add tasks to an existing plan
-router.post('/:id/tasks', async (req, res) => {
-  const plan = store.get().plans.find(p => p.id === req.params.id);
-  if (!plan) return res.status(404).json({ error: 'Not found' });
-  const { tasks } = req.body;
-  if (!Array.isArray(tasks) || tasks.length === 0) return res.status(400).json({ error: 'tasks array required' });
-  const newTasks = tasks.map(t => ({
-    id: store.nextId('TASK'),
-    title: t.title || '',
-    description: t.description || '',
-    steps: t.steps || [],
-    verification: t.verification || '',
-    blockedBy: t.blockedBy || [],
-    passes: false,
-    status: 'pending',
-    progressNotes: []
-  }));
+    };
+  });
   plan.tasks.push(...newTasks);
   resolveBlockedBy(plan.tasks);
   plan.updatedAt = new Date().toISOString();
   store.writeEntity('plans', plan.id, plan);
   res.status(201).json({ added: newTasks, total: plan.tasks.length });
-});
-
-// --- Agent-facing endpoints ---
+};
 
 // Get next available task (unblocked, pending)
-router.get('/:id/next-task', (req, res) => {
+export const nextTask = (req, res) => {
   const data = store.get();
   const plan = data.plans.find(p => p.id === req.params.id);
   if (!plan) return res.status(404).json({ error: 'Not found' });
@@ -147,10 +158,10 @@ router.get('/:id/next-task', (req, res) => {
     progress: { completed: passedIds.size, total: plan.tasks.length },
     allComplete: allDone
   });
-});
+};
 
 // Get plan init context
-router.get('/:id/context', (req, res) => {
+export const planContext = (req, res) => {
   const data = store.get();
   const plan = data.plans.find(p => p.id === req.params.id);
   if (!plan) return res.status(404).json({ error: 'Not found' });
@@ -165,10 +176,10 @@ router.get('/:id/context', (req, res) => {
     progress: { completed: completedTasks, total: totalTasks },
     tasks: plan.tasks.map(t => ({ id: t.id, title: t.title, status: t.status, passes: t.passes }))
   });
-});
+};
 
 // Update task (status, passes, progress note)
-router.patch('/:planId/tasks/:taskId', async (req, res) => {
+export const patchTask = (req, res) => {
   const plan = store.get().plans.find(p => p.id === req.params.planId);
   if (!plan) return res.status(404).json({ error: 'Plan not found' });
   const task = plan.tasks.find(t => t.id === req.params.taskId);
@@ -189,10 +200,9 @@ router.patch('/:planId/tasks/:taskId', async (req, res) => {
   plan.updatedAt = new Date().toISOString();
   store.writeEntity('plans', plan.id, plan);
   res.json(task);
-});
+};
 
-// Add comment to plan
-router.post('/:id/comments', async (req, res) => {
+export const addPlanComment = (req, res) => {
   const plan = store.get().plans.find(p => p.id === req.params.id);
   if (!plan) return res.status(404).json({ error: 'Not found' });
   const { author, text } = req.body;
@@ -207,6 +217,16 @@ router.post('/:id/comments', async (req, res) => {
   plan.updatedAt = new Date().toISOString();
   store.writeEntity('plans', plan.id, plan);
   res.status(201).json(comment);
-});
+};
+
+router.get('/', listPlans);
+router.get('/:id', getPlan);
+router.post('/', createPlan);
+router.patch('/:id', patchPlan);
+router.post('/:id/tasks', addPlanTasks);
+router.get('/:id/next-task', nextTask);
+router.get('/:id/context', planContext);
+router.patch('/:planId/tasks/:taskId', patchTask);
+router.post('/:id/comments', addPlanComment);
 
 export default router;

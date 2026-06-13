@@ -58,8 +58,32 @@ for (let i = 1; i < args.length; i++) {
   }
 }
 
-// --- Fetch helper ---
+// Serverless by default: CLI commands run in-process against the data files.
+// A server is used only when explicitly targeted — PM_URL (e.g. a shared
+// Tailscale instance) or --server. The dashboard (`pm serve`) is unaffected.
+const USE_SERVER = Boolean(process.env.PM_URL || flags.server);
+
+// --- Request helper (in-process dispatch, or HTTP when a server is targeted) ---
 async function api(method, path, body, { silent = false } = {}) {
+  if (!USE_SERVER) {
+    let result;
+    try {
+      const { dispatch } = await import('../lib/dispatch.js');
+      result = await dispatch(method, path, body);
+    } catch (err) {
+      process.stderr.write(`Local error: ${err.stack || err.message}\n`);
+      process.exit(1);
+    }
+    if (result.status < 200 || result.status >= 300) {
+      process.stderr.write(`Error ${result.status}: ${JSON.stringify(result.data)}\n`);
+      process.exit(1);
+    }
+    if (!silent && result.data !== undefined) {
+      process.stdout.write(JSON.stringify(result.data, null, 2) + '\n');
+    }
+    return result.data;
+  }
+
   const url = `${BASE_URL}${path}`;
   const opts = { method, headers: {} };
   if (body) {
