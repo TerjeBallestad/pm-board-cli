@@ -4,6 +4,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, openSyn
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { execSync, spawn } from 'child_process';
+import http from 'http';
+import https from 'https';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILENAME = 'pm.config.json';
@@ -28,33 +30,43 @@ function readConfig(configDir) {
 
 const configDir = findConfigDir();
 const config = readConfig(configDir);
-const BASE_URL = process.env.PM_URL || `http://localhost:${config?.port || 3333}`;
-
-// Safety: commands that talk to a server require either a config or explicit PM_URL
-const NO_CONFIG_COMMANDS = new Set(['init', '--help', 'update']);
-function requireConfig() {
-  if (!config && !process.env.PM_URL) {
-    process.stderr.write(
-      `No pm.config.json found in any parent directory.\n` +
-      `Run "pm init" to create one, or set PM_URL to target a specific server.\n`
-    );
-    process.exit(1);
-  }
-}
 
 // --- Arg parser ---
 const args = process.argv.slice(2);
 const subcmd = args[0] || '';
 const positional = [];
 const flags = {};
+const BOOLEAN_FLAGS = new Set(['all', 'help', 'json']);
 
 for (let i = 1; i < args.length; i++) {
   if (args[i].startsWith('--')) {
     const key = args[i].slice(2);
-    const val = args[i + 1] !== undefined && !args[i + 1].startsWith('--') ? args[++i] : 'true';
-    flags[key] = val;
+    if (BOOLEAN_FLAGS.has(key)) {
+      flags[key] = 'true';
+    } else if (key === 'server') {
+      const next = args[i + 1];
+      flags[key] = next && !next.startsWith('--') && /^https?:\/\//.test(next) ? args[++i] : 'true';
+    } else {
+      const val = args[i + 1] !== undefined && !args[i + 1].startsWith('--') ? args[++i] : 'true';
+      flags[key] = val;
+    }
   } else {
     positional.push(args[i]);
+  }
+}
+
+const serverFlagUrl = flags.server && flags.server !== 'true' ? flags.server : null;
+const BASE_URL = process.env.PM_URL || serverFlagUrl || `http://localhost:${config?.port || 3333}`;
+
+// Safety: commands that need PM context require either a config or an explicit server target.
+const NO_CONFIG_COMMANDS = new Set(['init', '--help', 'update']);
+function requireConfig() {
+  if (!config && !process.env.PM_URL && !flags.server) {
+    process.stderr.write(
+      `No pm.config.json found in any parent directory.\n` +
+      `Run "pm init" to create one, or set PM_URL/--server to target a specific server.\n`
+    );
+    process.exit(1);
   }
 }
 
@@ -62,6 +74,10 @@ for (let i = 1; i < args.length; i++) {
 // A server is used only when explicitly targeted — PM_URL (e.g. a shared
 // Tailscale instance) or --server. The dashboard (`pm serve`) is unaffected.
 const USE_SERVER = Boolean(process.env.PM_URL || flags.server);
+const TRANSPORT_FLAGS = new Set(['server']);
+function isRequestFlag(key) {
+  return !TRANSPORT_FLAGS.has(key) && key !== 'help';
+}
 
 // --- Request helper (in-process dispatch, or HTTP when a server is targeted) ---
 async function api(method, path, body, { silent = false } = {}) {
@@ -84,17 +100,10 @@ async function api(method, path, body, { silent = false } = {}) {
     return result.data;
   }
 
-  const url = `${BASE_URL}${path}`;
-  const opts = { method, headers: {} };
-  if (body) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  }
   try {
-    const res = await fetch(url, opts);
-    const data = await res.json();
-    if (!res.ok) {
-      process.stderr.write(`Error ${res.status}: ${JSON.stringify(data)}\n`);
+    const { status, data } = await httpJson(method, `${BASE_URL}${path}`, body);
+    if (status < 200 || status >= 300) {
+      process.stderr.write(`Error ${status}: ${JSON.stringify(data)}\n`);
       process.exit(1);
     }
     if (!silent) process.stdout.write(JSON.stringify(data, null, 2) + '\n');
@@ -103,6 +112,38 @@ async function api(method, path, body, { silent = false } = {}) {
     process.stderr.write(`Failed: ${err.message}\nIs the PM server running? Start it with: pm serve\n`);
     process.exit(1);
   }
+}
+
+function httpJson(method, url, body) {
+  return new Promise((resolveRequest, rejectRequest) => {
+    const parsed = new URL(url);
+    const payload = body ? JSON.stringify(body) : undefined;
+    const client = parsed.protocol === 'https:' ? https : http;
+    const req = client.request(parsed, {
+      method,
+      headers: {
+        Accept: 'application/json',
+        Connection: 'close',
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {})
+      },
+      agent: false
+    }, (res) => {
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { raw += chunk; });
+      res.on('end', () => {
+        let data = null;
+        if (raw) {
+          try { data = JSON.parse(raw); }
+          catch { data = raw; }
+        }
+        resolveRequest({ status: res.statusCode || 0, data });
+      });
+    });
+    req.on('error', rejectRequest);
+    if (payload) req.write(payload);
+    req.end();
+  });
 }
 
 // --- List formatter ---
@@ -299,6 +340,7 @@ function buildPatchBody() {
   resolveJsonFlag('tasks');
   const body = {};
   for (const [key, val] of Object.entries(flags)) {
+    if (!isRequestFlag(key)) continue;
     if (key === 'sprint') body.sprintId = val;
     else if (key === 'files') body.affectedFiles = val.split(',');
     else if (key === 'items') body.itemIds = val.split(',');
@@ -826,6 +868,7 @@ async function main() {
         await resolveBody();
         const patchBody = {};
         for (const [key, val] of Object.entries(flags)) {
+          if (!isRequestFlag(key)) continue;
           // Accept --body as alias for problemStatement on sprints
           if (key === 'body' || key === 'problem-statement') patchBody.problemStatement = val;
           else patchBody[key] = val;
