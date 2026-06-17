@@ -7,6 +7,15 @@
     "pm": "bin/pm"
   },
   "type": "module",
+  "files": [
+    "bin/",
+    "lib/",
+    "api/",
+    "dashboard/",
+    "defaults/",
+    "server.js",
+    "README.md"
+  ],
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
