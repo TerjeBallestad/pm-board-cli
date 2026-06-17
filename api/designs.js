@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import * as store from '../lib/store.js';
 import { resolveDataDir } from '../lib/config.js';
+import { coerceArrayField } from '../lib/coerce.js';
 
 const router = Router();
 
@@ -44,7 +45,6 @@ export const createDesign = (req, res) => {
   const { title, body, itemIds, sprintId } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
   const id = store.nextId('SDD');
-  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const design = {
     id, title,
@@ -68,15 +68,6 @@ export const createDesign = (req, res) => {
   store.writeEntity('designs', id, design);
   res.status(201).json(design);
 };
-
-// Coerce string-or-array → array for fields that MUST be arrays.
-function coerceArrayField(body, key) {
-  if (body[key] === undefined) return;
-  if (body[key] === '' || body[key] === null) { body[key] = []; return; }
-  if (typeof body[key] === 'string') {
-    body[key] = body[key].split(',').map(s => s.trim()).filter(Boolean);
-  }
-}
 
 export const patchDesign = (req, res) => {
   const design = store.get().designs.find(d => d.id === req.params.id);

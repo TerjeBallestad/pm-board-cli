@@ -44,8 +44,19 @@ for (let i = 1; i < args.length; i++) {
     if (BOOLEAN_FLAGS.has(key)) {
       flags[key] = 'true';
     } else if (key === 'server') {
+      // --server alone = use the local dashboard server from pm.config.json.
+      // --server <target> = that server. Accept a full URL, or a scheme-less
+      // host:port / host (auto-prefixed http://) so a forgotten scheme targets
+      // the remote instead of silently falling back to local. A bare positional
+      // (e.g. `list --server plan`) is NOT consumed — it stays a positional.
       const next = args[i + 1];
-      flags[key] = next && !next.startsWith('--') && /^https?:\/\//.test(next) ? args[++i] : 'true';
+      if (next && !next.startsWith('--') && /^https?:\/\//.test(next)) {
+        flags[key] = args[++i];
+      } else if (next && !next.startsWith('--') && /^([\w-]+(\.[\w-]+)+|[\w.-]+:\d+)$/.test(next)) {
+        flags[key] = `http://${args[++i]}`;
+      } else {
+        flags[key] = 'true';
+      }
     } else {
       const val = args[i + 1] !== undefined && !args[i + 1].startsWith('--') ? args[++i] : 'true';
       flags[key] = val;

@@ -12,6 +12,29 @@ function resolveBlockedBy(tasks) {
   }
 }
 
+// Build normalized plan tasks, allocating a fresh TASK id for any task that
+// needs one (ids batched so siblings don't collide before they hit disk).
+// `preserve` keeps caller-supplied id/passes/status/progressNotes — used by the
+// full-replacement PATCH; otherwise every task starts fresh and pending.
+function buildTasks(tasks, { preserve = false } = {}) {
+  const ids = [];
+  return (tasks || []).map(t => {
+    const id = (preserve && t.id) || store.nextId('TASK', ids);
+    ids.push(id);
+    return {
+      id,
+      title: t.title || '',
+      description: t.description || '',
+      steps: t.steps || [],
+      verification: t.verification || '',
+      blockedBy: t.blockedBy || [],
+      passes: preserve ? (t.passes || false) : false,
+      status: preserve ? (t.status || 'pending') : 'pending',
+      progressNotes: preserve ? (t.progressNotes || []) : []
+    };
+  });
+}
+
 export const listPlans = (req, res) => {
   let plans = store.get().plans;
   if (req.query.sprintId) plans = plans.filter(p => p.sprintId === req.query.sprintId);
@@ -28,7 +51,6 @@ export const createPlan = (req, res) => {
   const { title, sddId, sprintId, context: ctx, tasks } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
   const id = store.nextId('PLAN');
-  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const plan = {
     id, title,
@@ -36,24 +58,7 @@ export const createPlan = (req, res) => {
     stage: 'planned',
     sprintId: sprintId || null,
     context: ctx || { setupNotes: '', relevantFiles: [], designDecisions: '' },
-    tasks: (() => {
-      const ids = [];
-      return (tasks || []).map(t => {
-        const taskId = store.nextId('TASK', ids);
-        ids.push(taskId);
-        return {
-          id: taskId,
-          title: t.title || '',
-          description: t.description || '',
-          steps: t.steps || [],
-          verification: t.verification || '',
-          blockedBy: t.blockedBy || [],
-          passes: false,
-          status: 'pending',
-          progressNotes: []
-        };
-      });
-    })(),
+    tasks: buildTasks(tasks),
     comments: [],
     createdAt: now, updatedAt: now
   };
@@ -71,22 +76,7 @@ export const patchPlan = (req, res) => {
     if (req.body[key] !== undefined) plan[key] = req.body[key];
   }
   if (Array.isArray(req.body.tasks)) {
-    const ids = [];
-    plan.tasks = req.body.tasks.map(t => {
-      const taskId = t.id || store.nextId('TASK', ids);
-      ids.push(taskId);
-      return {
-        id: taskId,
-        title: t.title || '',
-        description: t.description || '',
-        steps: t.steps || [],
-        verification: t.verification || '',
-        blockedBy: t.blockedBy || [],
-        passes: t.passes || false,
-        status: t.status || 'pending',
-        progressNotes: t.progressNotes || []
-      };
-    });
+    plan.tasks = buildTasks(req.body.tasks, { preserve: true });
     resolveBlockedBy(plan.tasks);
   }
   plan.updatedAt = new Date().toISOString();
@@ -99,22 +89,7 @@ export const addPlanTasks = (req, res) => {
   if (!plan) return res.status(404).json({ error: 'Not found' });
   const { tasks } = req.body;
   if (!Array.isArray(tasks) || tasks.length === 0) return res.status(400).json({ error: 'tasks array required' });
-  const ids = [];
-  const newTasks = tasks.map(t => {
-    const taskId = store.nextId('TASK', ids);
-    ids.push(taskId);
-    return {
-      id: taskId,
-      title: t.title || '',
-      description: t.description || '',
-      steps: t.steps || [],
-      verification: t.verification || '',
-      blockedBy: t.blockedBy || [],
-      passes: false,
-      status: 'pending',
-      progressNotes: []
-    };
-  });
+  const newTasks = buildTasks(tasks);
   plan.tasks.push(...newTasks);
   resolveBlockedBy(plan.tasks);
   plan.updatedAt = new Date().toISOString();

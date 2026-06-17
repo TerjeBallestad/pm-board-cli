@@ -22,7 +22,6 @@ export const createSprint = (req, res) => {
   const { name, problemStatement } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const id = store.nextId('SPRINT');
-  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const sprint = {
     id, name,

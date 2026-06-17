@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import * as store from '../lib/store.js';
 import { getConfig, getTypePrefix, resolveDataDir } from '../lib/config.js';
+import { coerceArrayField } from '../lib/coerce.js';
 
 const router = Router();
 
@@ -15,15 +16,6 @@ function readSidecarTests(subdir, id) {
   } catch (err) {
     console.error(`[${subdir}] sidecar read failed for ${id}:`, err.message);
     return null;
-  }
-}
-
-// Coerce string-or-array → array for fields that MUST be arrays.
-function coerceArrayField(body, key) {
-  if (body[key] === undefined) return;
-  if (body[key] === '' || body[key] === null) { body[key] = []; return; }
-  if (typeof body[key] === 'string') {
-    body[key] = body[key].split(',').map(s => s.trim()).filter(Boolean);
   }
 }
 
@@ -80,7 +72,6 @@ export const createItem = (req, res) => {
   const typePrefix = getTypePrefix();
   const prefix = typePrefix[type] || Object.keys(config.entityTypes)[0] || 'SB';
   const id = store.nextId(prefix);
-  if (store.idExists(id)) return res.status(409).json({ error: `id ${id} already exists — refusing to overwrite` });
   const now = new Date().toISOString();
   const item = {
     id, type: type || 'issue', title,

@@ -70,15 +70,29 @@ test('dispatch fresh-reads disk between calls (no stale cache)', async (t) => {
   assert.equal(created.data.id, 'SB-010');
 });
 
-test('dispatch refuses filename/frontmatter id mismatch instead of risking overwrite', async (t) => {
+test('dispatch quarantines a malformed file instead of bricking, and reserves its id', async (t) => {
   const { dir, cleanup } = setup();
   t.after(cleanup);
+  // A good design plus a malformed (id-mismatched) one — the kind a bad merge
+  // or hand edit produces.
+  writeFileSync(join(dir, 'data', 'designs', 'SDD-001.md'), '---\nid: SDD-001\ntitle: good\n---\n');
   writeFileSync(join(dir, 'data', 'designs', 'SDD-006.md'), '---\nid: SDD-005\ntitle: mismatched\n---\n');
 
-  await assert.rejects(
-    () => dispatch('POST', '/api/designs', { title: 'Should fail loudly' }),
-    /filename.*SDD-006.*frontmatter.*SDD-005/i
-  );
+  // The CLI still works: list returns only the well-formed design.
+  const list = await dispatch('GET', '/api/designs');
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.data.map(d => d.id), ['SDD-001']);
+
+  // The bad file is reported as quarantined, not silently dropped.
+  const quarantined = store.getQuarantined();
+  assert.ok(quarantined.some(q => q.file === 'SDD-006.md'));
+
+  // A new create succeeds and must NOT reuse SDD-006 (the malformed file's
+  // slot) — it skips past it so the file the user is fixing is never overwritten.
+  const created = await dispatch('POST', '/api/designs', { title: 'new' });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.id, 'SDD-007');
+  assert.equal(readFileSync(join(dir, 'data', 'designs', 'SDD-006.md'), 'utf8').includes('mismatched'), true);
 });
 
 test('dispatch returns 404 for unknown id and 501 for unmapped route', async (t) => {

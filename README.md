@@ -53,7 +53,7 @@ pm list --server http://my-host:3333       # same, explicit URL
 pm list --server                           # use the local dashboard server from pm.config.json
 ```
 
-> **Safety notes:** sequential ids can still collide if two processes create the same entity type concurrently while offline; avoid parallel local writes. On load, PM also validates that data filenames match their embedded `id` fields and fails loudly on mismatch instead of risking an overwrite after a bad merge or hand edit.
+> **Safety notes:** sequential ids can still collide if two processes create the same entity type concurrently while offline; avoid parallel local writes. On load, PM validates that each data file's name matches its embedded `id`. A malformed or mismatched file (e.g. after a bad merge or hand edit) is **skipped with a warning** rather than bricking the CLI — the rest of your data stays usable — and its id stays **reserved** so a later create never overwrites the file you're fixing.
 
 ## CLI Reference
 

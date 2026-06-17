@@ -110,6 +110,23 @@ test('--server URL targets that URL, not the local config port', async (t) => {
   assert.equal(JSON.parse(res.stdout).title, 'remote item');
 });
 
+test('--server <host:port> without scheme targets the remote, not local', async (t) => {
+  const { dir, cleanup } = setupProject();
+  t.after(cleanup);
+  const server = await withJsonServer(() => ({ body: { id: 'SB-001', title: 'remote item' } }));
+  t.after(() => server.close());
+  // Local config points at a different (dead) port — if the scheme-less host
+  // were ignored we'd hit local and fail, not reach this server.
+  writeFileSync(join(dir, 'pm.config.json'), JSON.stringify({ name: 'CLI Test', port: 1, dataDir: 'data' }));
+  const hostPort = server.url.replace('http://', ''); // e.g. 127.0.0.1:54321
+
+  const res = await runPm(dir, ['get', 'SB-001', '--server', hostPort]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(server.requests.length, 1);
+  assert.equal(server.requests[0].url, '/api/items/SB-001');
+  assert.equal(JSON.parse(res.stdout).title, 'remote item');
+});
+
 test('transport flags are not forwarded into patch bodies', async (t) => {
   const { dir, cleanup } = setupProject();
   t.after(cleanup);

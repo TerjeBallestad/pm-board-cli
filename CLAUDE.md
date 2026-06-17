@@ -56,6 +56,8 @@ The server is a long-running process that caches code in memory. CLI changes tak
 - `defaults/` — Default configuration templates
 - `tests/` — Integration tests; `helpers.js` provides `setupTestApp()`; `dispatch.test.js` covers the serverless path.
 
-**IDs (`store.nextId`)** are derived from `max(existing ids on disk)+1`, not a persisted counter — this is deliberate (a counter drifts across git branches / stale RAM and overwrites records). Nested plan tasks are included in the scan; batch allocation passes already-assigned ids via the second arg. Create handlers call `store.idExists(id)` and 409 rather than overwrite.
+**IDs (`store.nextId`)** are derived from `max(existing ids on disk)+1`, not a persisted counter — this is deliberate (a counter drifts across git branches / stale RAM and overwrites records). Nested plan tasks are included in the scan; batch allocation passes already-assigned ids via the second arg. Overwrite protection is the derivation itself: `max+1` over every id pool (active, archive, nested tasks, **and quarantined files**) can't collide with anything on disk, so create handlers never need a separate existence check.
+
+**Malformed files don't brick the CLI.** A data file whose name doesn't match its embedded `id`, or that fails to parse, is **skipped with a warning** during `store.load()` (see `quarantineFile`) instead of throwing. Its filename-derived id is still added to the id pool (`allIdPools` includes `quarantined`), so a later create can't reuse the slot and overwrite the file being fixed. `store.getQuarantined()` reports what was skipped.
 
 **When adding a route**: write the handler as an exported function, register it on the router, AND add it to the `ROUTE_TABLE` in `lib/dispatch.js` (specific paths before `:id` catch-alls) or the CLI can't reach it.
