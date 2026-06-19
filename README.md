@@ -48,11 +48,12 @@ As of 0.2.0 the CLI runs **in-process against the data files** — no server req
 To target a server instead (e.g. a single shared instance over Tailscale), set `PM_URL` or pass `--server`:
 
 ```bash
-PM_URL=http://my-host:3333 pm list        # use a remote server
-pm list --server                           # use the local dashboard server
+PM_URL=http://my-host:3333 pm list          # use a remote server
+pm list --server http://my-host:3333       # same, explicit URL
+pm list --server                           # use the local dashboard server from pm.config.json
 ```
 
-> **Concurrency note:** sequential ids can still collide if two machines create the *same* entity type while offline and diverged. That is a separate, deliberately deferred problem; at merge time it shows up as two files with the same id — detectable, not a silent overwrite.
+> **Safety notes:** sequential ids can still collide if two processes create the same entity type concurrently while offline; avoid parallel local writes. On load, PM also validates that data filenames match their embedded `id` fields and fails loudly on mismatch instead of risking an overwrite after a bad merge or hand edit.
 
 ## CLI Reference
 

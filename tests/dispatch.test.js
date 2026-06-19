@@ -70,6 +70,17 @@ test('dispatch fresh-reads disk between calls (no stale cache)', async (t) => {
   assert.equal(created.data.id, 'SB-010');
 });
 
+test('dispatch refuses filename/frontmatter id mismatch instead of risking overwrite', async (t) => {
+  const { dir, cleanup } = setup();
+  t.after(cleanup);
+  writeFileSync(join(dir, 'data', 'designs', 'SDD-006.md'), '---\nid: SDD-005\ntitle: mismatched\n---\n');
+
+  await assert.rejects(
+    () => dispatch('POST', '/api/designs', { title: 'Should fail loudly' }),
+    /filename.*SDD-006.*frontmatter.*SDD-005/i
+  );
+});
+
 test('dispatch returns 404 for unknown id and 501 for unmapped route', async (t) => {
   const { cleanup } = setup();
   t.after(cleanup);
