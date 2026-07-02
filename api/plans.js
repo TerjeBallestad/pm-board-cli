@@ -3,13 +3,40 @@ import * as store from '../lib/store.js';
 
 const router = Router();
 
-// Resolve ordinal blockedBy refs (e.g. "TASK-1" meaning task index 0) to real TASK-NNN IDs
-function resolveBlockedBy(tasks) {
-  const ordinalMap = {};
-  tasks.forEach((t, i) => { ordinalMap[`TASK-${i + 1}`] = t.id; });
-  for (const task of tasks) {
-    task.blockedBy = (task.blockedBy || []).map(ref => ordinalMap[ref] || ref);
+// Resolve a single blockedBy ref to a real TASK-NNN id.
+// Accepts a real task id, or any ordinal/cardinal form meaning "the Nth task in
+// this plan" (1-indexed): "TASK-1", "Task 1", "task_1", "#1", "1". Returns the
+// ref unchanged if it resolves to nothing — unresolvedBlockedBy() flags that.
+function resolveRef(ref, tasks, byId) {
+  if (byId.has(ref)) return ref;
+  const m = String(ref).match(/^\s*(?:task[\s\-_]*)?#?(\d+)\s*$/i);
+  if (m) {
+    const idx = parseInt(m[1], 10) - 1;
+    if (idx >= 0 && idx < tasks.length) return tasks[idx].id;
   }
+  return ref;
+}
+
+// Rewrite every task's blockedBy from ordinal/cardinal refs to real task ids.
+function resolveBlockedBy(tasks) {
+  const byId = new Set(tasks.map(t => t.id));
+  for (const task of tasks) {
+    task.blockedBy = (task.blockedBy || []).map(ref => resolveRef(ref, tasks, byId));
+  }
+}
+
+// Return human-readable errors for any blockedBy ref that did not resolve to a
+// real task id in this plan. Empty array = all refs valid. Run AFTER
+// resolveBlockedBy so the only survivors are genuinely unresolvable refs.
+function unresolvedBlockedBy(tasks) {
+  const byId = new Set(tasks.map(t => t.id));
+  const errors = [];
+  for (const task of tasks) {
+    for (const dep of (task.blockedBy || [])) {
+      if (!byId.has(dep)) errors.push(`${task.id} blockedBy "${dep}" matches no task id or ordinal`);
+    }
+  }
+  return errors;
 }
 
 // Build normalized plan tasks, allocating a fresh TASK id for any task that
@@ -63,6 +90,8 @@ export const createPlan = (req, res) => {
     createdAt: now, updatedAt: now
   };
   resolveBlockedBy(plan.tasks);
+  const createErrors = unresolvedBlockedBy(plan.tasks);
+  if (createErrors.length) return res.status(400).json({ error: 'unresolved blockedBy refs', details: createErrors });
   store.get().plans.push(plan);
   store.writeEntity('plans', id, plan);
   res.status(201).json(plan);
@@ -76,8 +105,11 @@ export const patchPlan = (req, res) => {
     if (req.body[key] !== undefined) plan[key] = req.body[key];
   }
   if (Array.isArray(req.body.tasks)) {
-    plan.tasks = buildTasks(req.body.tasks, { preserve: true });
-    resolveBlockedBy(plan.tasks);
+    const newTasks = buildTasks(req.body.tasks, { preserve: true });
+    resolveBlockedBy(newTasks);
+    const patchErrors = unresolvedBlockedBy(newTasks);
+    if (patchErrors.length) return res.status(400).json({ error: 'unresolved blockedBy refs', details: patchErrors });
+    plan.tasks = newTasks;
   }
   plan.updatedAt = new Date().toISOString();
   store.writeEntity('plans', plan.id, plan);
@@ -90,8 +122,11 @@ export const addPlanTasks = (req, res) => {
   const { tasks } = req.body;
   if (!Array.isArray(tasks) || tasks.length === 0) return res.status(400).json({ error: 'tasks array required' });
   const newTasks = buildTasks(tasks);
-  plan.tasks.push(...newTasks);
-  resolveBlockedBy(plan.tasks);
+  const merged = [...plan.tasks, ...newTasks];
+  resolveBlockedBy(merged);
+  const addErrors = unresolvedBlockedBy(merged);
+  if (addErrors.length) return res.status(400).json({ error: 'unresolved blockedBy refs', details: addErrors });
+  plan.tasks = merged;
   plan.updatedAt = new Date().toISOString();
   store.writeEntity('plans', plan.id, plan);
   res.status(201).json({ added: newTasks, total: plan.tasks.length });
@@ -103,14 +138,12 @@ export const nextTask = (req, res) => {
   const plan = data.plans.find(p => p.id === req.params.id);
   if (!plan) return res.status(404).json({ error: 'Not found' });
 
-  const ordinalMap = {};
-  plan.tasks.forEach((t, i) => { ordinalMap[`TASK-${i + 1}`] = t.id; });
-
+  const byId = new Set(plan.tasks.map(t => t.id));
   const passedIds = new Set(plan.tasks.filter(t => t.passes).map(t => t.id));
 
   const tasks = plan.tasks.map(t => ({
     ...t,
-    unblocked: (t.blockedBy || []).every(depId => passedIds.has(ordinalMap[depId] || depId))
+    unblocked: (t.blockedBy || []).every(depId => passedIds.has(resolveRef(depId, plan.tasks, byId)))
   }));
 
   const allDone = plan.tasks.every(t => t.passes);

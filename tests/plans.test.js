@@ -38,6 +38,64 @@ test('blockedBy ordinals (TASK-1, TASK-2) resolve to real task IDs', async (t) =
   assert.deepEqual(c.blockedBy, [a.id, b.id]);
 });
 
+test('blockedBy accepts liberal ordinal forms ("Task 1", "task_2", cardinal "1")', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const res = await request(app).post('/api/plans').send({
+    title: 'p',
+    tasks: [
+      { title: 'A' },
+      { title: 'B', blockedBy: ['Task 1'] },
+      { title: 'C', blockedBy: ['task_2', '1'] }
+    ]
+  });
+  assert.equal(res.status, 201);
+  const [a, b, c] = res.body.tasks;
+  assert.deepEqual(b.blockedBy, [a.id], '"Task 1" (space form) must resolve');
+  assert.deepEqual(c.blockedBy, [b.id, a.id], '"task_2" and cardinal "1" must resolve');
+});
+
+test('unresolvable blockedBy ref is rejected with 400 (no silent stall)', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const res = await request(app).post('/api/plans').send({
+    title: 'p',
+    tasks: [
+      { title: 'A' },
+      { title: 'B', blockedBy: ['Task 9'] }   // only 2 tasks — ordinal 9 cannot resolve
+    ]
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /unresolved blockedBy/);
+  assert.ok(res.body.details.some(d => d.includes('Task 9')));
+});
+
+test('next-task unblocks dependents authored with the space form after the dep passes', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  // This is the exact PLAN-077 regression: dependents written as "Task 1" must
+  // flip to unblocked once the real first task passes.
+  const created = await request(app).post('/api/plans').send({
+    title: 'p',
+    tasks: [
+      { title: 'A' },
+      { title: 'B', blockedBy: ['Task 1'] }
+    ]
+  });
+  const planId = created.body.id;
+  const [a, b] = created.body.tasks;
+
+  const before = await request(app).get(`/api/plans/${planId}/next-task`);
+  const bBefore = before.body.tasks.find(t => t.id === b.id);
+  assert.equal(bBefore.unblocked, false, 'B blocked until A passes');
+
+  await request(app).patch(`/api/plans/${planId}/tasks/${a.id}`).send({ passes: true });
+
+  const after = await request(app).get(`/api/plans/${planId}/next-task`);
+  const bAfter = after.body.tasks.find(t => t.id === b.id);
+  assert.equal(bAfter.unblocked, true, 'B unblocks once A passes (regression: was stuck false)');
+});
+
 test('next-task returns unblocked tasks with progress', async (t) => {
   const { app, cleanup } = await setupTestApp();
   t.after(cleanup);
