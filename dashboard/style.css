@@ -2357,3 +2357,87 @@ html, body {
   .detail-title { font-size: 32px; }
   .detail-title input { font-size: 32px; }
 }
+
+/* ─────────────────────────────────────────────── Quick-open palette (Cmd+K) */
+
+.quick-open-backdrop {
+  align-items: flex-start;
+  padding-top: 12vh;
+  z-index: 300;
+}
+
+.quick-open {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 580px;
+  max-width: 92vw;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  animation: modalSlideIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#quickOpenInput {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 15px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+#quickOpenInput::placeholder { color: var(--text-muted); }
+
+.quick-open-results {
+  max-height: 48vh;
+  overflow-y: auto;
+}
+
+.quick-open-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 20px;
+  cursor: pointer;
+}
+
+.quick-open-row:hover { background: var(--bg-tertiary); }
+
+.quick-open-row.selected {
+  background: var(--bg-tertiary);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.quick-open-id {
+  font-family: "Fira Code", monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.quick-open-title {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-open-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.quick-open-empty {
+  padding: 16px 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}

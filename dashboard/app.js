@@ -2756,6 +2756,111 @@ function closeSprintModal() {
   if (backdrop) backdrop.classList.add("hidden");
 }
 
+// ─────────────────────────────────────────────── Quick-open palette (Cmd+K)
+
+let qoResults = [];
+let qoIndex = 0;
+
+/** All openable entities, ignoring sprint/type/search filters. */
+function quickOpenCandidates() {
+  const out = [];
+  for (const i of state.items)
+    out.push({ id: i.id, title: i.title || "", kind: "item", label: i.type || "item" });
+  for (const d of state.designs)
+    out.push({ id: d.id, title: d.title || "", kind: "sdd", label: "sdd" });
+  for (const p of state.plans)
+    out.push({ id: p.id, title: p.title || p.name || "", kind: "plan", label: "plan" });
+  for (const s of state.sprints)
+    out.push({ id: s.id, title: s.name || "", kind: "sprint", label: "sprint" });
+  return out;
+}
+
+/**
+ * Rank candidates against the query. ID matches beat title matches;
+ * IDs are compared with separators stripped so "sdd106" and "sdd 106"
+ * both hit "SDD-106".
+ */
+function quickOpenFilter(query) {
+  const cands = quickOpenCandidates();
+  if (!query) return cands.slice(0, 20);
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const qn = norm(query);
+  const ql = query.toLowerCase();
+  const scored = [];
+  for (const c of cands) {
+    const idn = norm(c.id);
+    const title = c.title.toLowerCase();
+    let score = -1;
+    if (qn && idn === qn) score = 0;
+    else if (qn && idn.startsWith(qn)) score = 1;
+    else if (qn && idn.includes(qn)) score = 2;
+    else if (title.startsWith(ql)) score = 3;
+    else if (title.includes(ql)) score = 4;
+    if (score >= 0) scored.push({ c, score });
+  }
+  scored.sort(
+    (a, b) =>
+      a.score - b.score ||
+      a.c.id.localeCompare(b.c.id, undefined, { numeric: true }),
+  );
+  return scored.slice(0, 20).map((s) => s.c);
+}
+
+function renderQuickOpenResults() {
+  const box = document.getElementById("quickOpenResults");
+  const input = document.getElementById("quickOpenInput");
+  if (!box || !input) return;
+  qoResults = quickOpenFilter(input.value.trim());
+  if (qoIndex >= qoResults.length) qoIndex = 0;
+  if (qoResults.length === 0) {
+    box.innerHTML = `<div class="quick-open-empty">No matches</div>`;
+    return;
+  }
+  box.innerHTML = qoResults
+    .map(
+      (c, i) => `
+      <div class="quick-open-row${i === qoIndex ? " selected" : ""}" data-index="${i}">
+        <span class="quick-open-id">${escText(c.id)}</span>
+        <span class="quick-open-title">${escText(c.title)}</span>
+        <span class="quick-open-kind">${escText(c.label)}</span>
+      </div>`,
+    )
+    .join("");
+}
+
+function updateQuickOpenSelection() {
+  const box = document.getElementById("quickOpenResults");
+  if (!box) return;
+  box.querySelectorAll(".quick-open-row").forEach((row) => {
+    const selected = Number(row.dataset.index) === qoIndex;
+    row.classList.toggle("selected", selected);
+    if (selected) row.scrollIntoView({ block: "nearest" });
+  });
+}
+
+function openQuickOpen() {
+  const backdrop = document.getElementById("quickOpenBackdrop");
+  const input = document.getElementById("quickOpenInput");
+  if (!backdrop || !input) return;
+  backdrop.classList.remove("hidden");
+  input.value = "";
+  qoIndex = 0;
+  renderQuickOpenResults();
+  input.focus();
+}
+
+function closeQuickOpen() {
+  document.getElementById("quickOpenBackdrop")?.classList.add("hidden");
+}
+
+function quickOpenEntity(c) {
+  closeQuickOpen();
+  if (c.kind === "sdd") showSddDetail(c.id);
+  else if (c.kind === "plan") showPlanDetail(c.id);
+  else if (c.kind === "sprint") showSprintDossier(c.id);
+  else showDetailOverlay(c.id);
+}
+
 // ─────────────────────────────────────────────────────────── Event wiring
 
 function initEvents() {
@@ -2886,9 +2991,59 @@ function initEvents() {
     if (e.target === e.currentTarget) closeDetailOverlay();
   });
 
+  // Quick-open palette: Cmd+K / Ctrl+K
+  document.addEventListener("keydown", (e) => {
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.shiftKey &&
+      !e.altKey &&
+      e.key.toLowerCase() === "k"
+    ) {
+      e.preventDefault();
+      openQuickOpen();
+    }
+  });
+
+  const qoInput = document.getElementById("quickOpenInput");
+  qoInput?.addEventListener("input", () => {
+    qoIndex = 0;
+    renderQuickOpenResults();
+  });
+  qoInput?.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      qoIndex = Math.min(qoIndex + 1, qoResults.length - 1);
+      updateQuickOpenSelection();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      qoIndex = Math.max(qoIndex - 1, 0);
+      updateQuickOpenSelection();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const c = qoResults[qoIndex];
+      if (c) quickOpenEntity(c);
+    }
+  });
+  document.getElementById("quickOpenResults")?.addEventListener("click", (e) => {
+    const row = e.target.closest(".quick-open-row");
+    if (!row) return;
+    const c = qoResults[Number(row.dataset.index)];
+    if (c) quickOpenEntity(c);
+  });
+  document
+    .getElementById("quickOpenBackdrop")
+    ?.addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) closeQuickOpen();
+    });
+
   // Escape to close overlays/modals
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      const quickOpen = document.getElementById("quickOpenBackdrop");
+      if (quickOpen && !quickOpen.classList.contains("hidden")) {
+        closeQuickOpen();
+        return;
+      }
       const overlay = document.getElementById("detailOverlay");
       if (overlay && !overlay.classList.contains("hidden")) {
         closeDetailOverlay();
