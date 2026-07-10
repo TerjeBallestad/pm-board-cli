@@ -245,6 +245,7 @@ async function fetchListByType(typeArg) {
   if (flags.stage) params.set('stage', flags.stage);
   if (flags.priority) params.set('priority', flags.priority);
   if (flags.sprint) params.set('sprintId', flags.sprint);
+  if (flags.frontier === 'true') params.set('frontier', 'true');
   const qs = params.toString();
   return api('GET', `/api/items${qs ? '?' + qs : ''}`, undefined, { silent: true });
 }
@@ -320,6 +321,7 @@ function buildItemBody(type, title) {
   if (flags.pillar) body.pillar = flags.pillar;
   if (flags.sprint) body.sprintId = flags.sprint;
   if (flags.files) body.affectedFiles = flags.files.split(',');
+  if (flags.blockedBy) body.blockedBy = flags.blockedBy.split(',');
   return body;
 }
 
@@ -356,6 +358,7 @@ function buildPatchBody() {
     else if (key === 'files') body.affectedFiles = val.split(',');
     else if (key === 'items') body.itemIds = val.split(',');
     else if (key === 'related') body.related = val === '' ? [] : val.split(',');
+    else if (key === 'blockedBy') body.blockedBy = val === '' ? [] : val.split(',');
     else body[key] = val;
   }
   return body;
@@ -376,7 +379,7 @@ Setup:
 Commands:
   health                         Server health check
   get <id>                       Get item by ID
-  list [<type>] [--stage S] [--priority P] [--sprint ID] [--limit N] [--all] [--json]
+  list [<type>] [--stage S] [--priority P] [--sprint ID] [--frontier] [--limit N] [--all] [--json]
                                  List entities — terse "ID  title", sorted
                                  oldest→newest, default 20. <type> is one of:
                                  sdd, plan, sprint, issue, decision, concern, gap.
@@ -595,6 +598,8 @@ Items (SB, DD, DC, GAP, ...):
   --sprint SPRINT-NNN   Assign to sprint
   --files f1,f2         Set affected files (comma-separated)
   --related IDs         Set related IDs (comma-separated, e.g. SDD-060,DD-042)
+  --blockedBy IDs       Set blocking edges (comma-separated; '' clears). Items whose
+                        blockers are all done/archived show in "pm list --frontier"
 
 Designs (SDD):
   --title T             Rename

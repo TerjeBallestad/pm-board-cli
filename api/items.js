@@ -47,6 +47,19 @@ export const listItems = (req, res) => {
   if (req.query.stage) items = items.filter(i => i.stage === req.query.stage);
   if (req.query.priority) items = items.filter(i => i.priority === req.query.priority);
   if (req.query.sprintId) items = items.filter(i => i.sprintId === req.query.sprintId);
+  if (req.query.frontier === 'true') {
+    // Frontier = not done, and no blocker that is itself an active, not-done item.
+    // Blockers that are done, archived, or unknown ids do not block.
+    const activeById = new Map(store.get().items.map(i => [i.id, i]));
+    items = items.filter(i => {
+      if (i.stage === 'done') return false;
+      const blockers = Array.isArray(i.blockedBy) ? i.blockedBy : [];
+      return !blockers.some(id => {
+        const blocker = activeById.get(id);
+        return blocker && blocker.stage !== 'done';
+      });
+    });
+  }
   res.json(items.map(i => {
     if (!i.id || !i.id.startsWith('DD-')) return i;
     const tests = readSidecarTests('items', i.id);
@@ -65,7 +78,7 @@ export const getItem = (req, res) => {
 };
 
 export const createItem = (req, res) => {
-  const { type, title, priority, body, pillar, related, affectedFiles, stage } = req.body;
+  const { type, title, priority, body, pillar, related, affectedFiles, blockedBy, stage } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
   const config = getConfig();
   const stages = config.stages;
@@ -81,6 +94,7 @@ export const createItem = (req, res) => {
     body: body || '',
     related: related || [],
     affectedFiles: affectedFiles || [],
+    blockedBy: blockedBy || [],
     sprintId: req.body.sprintId || null,
     comments: [],
     createdAt: now, updatedAt: now
@@ -98,7 +112,8 @@ export const patchItem = (req, res) => {
   const stages = config.stages;
   coerceArrayField(req.body, 'related');
   coerceArrayField(req.body, 'affectedFiles');
-  const allowed = ['title', 'priority', 'pillar', 'stage', 'body', 'related', 'affectedFiles', 'sprintId'];
+  coerceArrayField(req.body, 'blockedBy');
+  const allowed = ['title', 'priority', 'pillar', 'stage', 'body', 'related', 'affectedFiles', 'blockedBy', 'sprintId'];
   for (const key of allowed) {
     if (req.body[key] !== undefined) item[key] = req.body[key];
   }

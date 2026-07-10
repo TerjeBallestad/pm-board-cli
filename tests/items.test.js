@@ -145,3 +145,42 @@ test('archive moves item out of active list', async (t) => {
   assert.equal(archivedList.body.length, 1);
   assert.equal(archivedList.body[0].id, id);
 });
+
+test('blockedBy: set on create, patch, and string coercion', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const created = await request(app)
+    .post('/api/items')
+    .send({ type: 'issue', title: 'blocked', blockedBy: ['SB-099'] });
+  assert.deepEqual(created.body.blockedBy, ['SB-099']);
+  const patched = await request(app)
+    .patch(`/api/items/${created.body.id}`)
+    .send({ blockedBy: 'SB-001,SB-002' });
+  assert.deepEqual(patched.body.blockedBy, ['SB-001', 'SB-002']);
+  const cleared = await request(app)
+    .patch(`/api/items/${created.body.id}`)
+    .send({ blockedBy: '' });
+  assert.deepEqual(cleared.body.blockedBy, []);
+});
+
+test('GET /api/items?frontier=true hides blocked and done items', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const blocker = await request(app).post('/api/items').send({ type: 'issue', title: 'blocker' }); // SB-001
+  const blocked = await request(app).post('/api/items').send({ type: 'issue', title: 'blocked', blockedBy: [blocker.body.id] });
+  const free = await request(app).post('/api/items').send({ type: 'issue', title: 'free' });
+  const ghost = await request(app).post('/api/items').send({ type: 'issue', title: 'ghost-blocked', blockedBy: ['SB-999'] });
+
+  let res = await request(app).get('/api/items?frontier=true');
+  let titles = res.body.map(i => i.title).sort();
+  // blocker itself is on the frontier; blocked is hidden; unknown blocker ids don't block
+  assert.deepEqual(titles, ['blocker', 'free', 'ghost-blocked']);
+
+  // Completing the blocker releases the blocked item; done items leave the frontier
+  await request(app).patch(`/api/items/${blocker.body.id}`).send({ stage: 'done' });
+  res = await request(app).get('/api/items?frontier=true');
+  titles = res.body.map(i => i.title).sort();
+  assert.deepEqual(titles, ['blocked', 'free', 'ghost-blocked']);
+  assert.equal(free.status, 201);
+  assert.equal(ghost.status, 201);
+});
