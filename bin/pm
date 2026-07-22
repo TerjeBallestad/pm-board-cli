@@ -206,7 +206,7 @@ function printList(items) {
 const RESERVED_LIST_TYPES = {
   sdd: 'sdd', sdds: 'sdd', design: 'sdd', designs: 'sdd',
   plan: 'plan', plans: 'plan',
-  sprint: 'sprint', sprints: 'sprint'
+  sprint: 'sprint', sprints: 'sprint', project: 'sprint', projects: 'sprint'
 };
 function buildTypeAliases() {
   const aliases = { ...RESERVED_LIST_TYPES };
@@ -220,6 +220,19 @@ function buildTypeAliases() {
   }
   return aliases;
 }
+// Words that are almost certainly a mistyped subcommand, not a title.
+// `pm sdd list` used to create an SDD literally titled "list".
+const COMMAND_WORD_TITLES = /^(list|ls|get|show|view|open|create|new|delete|remove|rm|update|patch|edit|help|status)$/i;
+
+function rejectCommandWordTitle(title, typeName) {
+  if (!COMMAND_WORD_TITLES.test(title)) return;
+  process.stderr.write(
+    `"${title}" looks like a subcommand, not a title — refusing to create a ${typeName} named "${title}".\n` +
+    `  To list:   pm list ${typeName}   (or: pm ${typeName} list)\n` +
+    `  To create: pm ${typeName} "a real title"\n`);
+  process.exit(1);
+}
+
 function resolveListType(input) {
   if (!input) return { canonical: null };
   const aliases = buildTypeAliases();
@@ -283,6 +296,7 @@ function commentRoute(id) {
   }
   if (upper.startsWith('SDD-')) return `/api/designs/${id}/comments`;
   if (upper.startsWith('PLAN-')) return `/api/plans/${id}/comments`;
+  if (upper.startsWith('SPRINT-')) return `/api/sprints/${id}/comments`;
   process.stderr.write(`Comments not supported for prefix: ${id}\n`);
   process.exit(1);
 }
@@ -420,12 +434,12 @@ Plan / Task:
                                  [--note N | @file.md | -]
   plan-update <plan-id> [--tasks @file.json] [--title T] [--stage S]
 
-Sprint:
-  sprint [id]                    Get sprint detail (default: first active sprint)
-  sprint create "name" [--body "problem statement"]
-                                 Create a new sprint (status: active)
-  sprint <SPRINT-id> [--name N] [--body B] [--status S]
-                                 Patch sprint (--body maps to problemStatement)
+Project (alias: sprint — ids stay SPRINT-NNN):
+  project [id]                   Get project detail incl. its items/designs/plans
+  project create "name" [--destination "where this arrives"] [--body "markdown doc"]
+                                 Create a new project (status: active)
+  project <SPRINT-id> [--name N] [--destination D] [--body B] [--status S]
+                                 Patch project (--body = markdown doc: decisions log, out-of-scope)
 
 Exploration / Context:
   explore <sprint-id>            Generate sprint dossier
@@ -752,6 +766,10 @@ async function main() {
     case 'sdd':
     case 'design': {
       const action = positional[0];
+      if (action === 'list') {
+        printList(await fetchListByType('sdd'));
+        break;
+      }
       if (action === 'create') {
         const title = positional[1];
         if (!title) { process.stderr.write('Usage: pm sdd create "title" [--body B] [--items IDs] [--sprint ID]\n'); process.exit(1); }
@@ -769,6 +787,7 @@ async function main() {
           await api('GET', `/api/designs/${action}`);
         }
       } else if (action) {
+        rejectCommandWordTitle(action, 'sdd');
         await resolveBody();
         const body = { title: action };
         if (flags.body) body.body = flags.body;
@@ -834,6 +853,10 @@ async function main() {
 
     case 'plan': {
       const action = positional[0];
+      if (action === 'list') {
+        printList(await fetchListByType('plan'));
+        break;
+      }
       if (action === 'create') {
         const chunks = [];
         for await (const chunk of process.stdin) chunks.push(chunk);
@@ -865,28 +888,33 @@ async function main() {
       break;
     }
 
+    case 'project':
     case 'sprint': {
       const action = positional[0];
-      // pm sprint create "name" [--body "problem statement"]
+      if (action === 'list') {
+        printList(await fetchListByType('sprint'));
+        break;
+      }
+      // pm project create "name" [--destination "..."] [--body "markdown doc"]
       if (action === 'create') {
         const name = positional[1];
-        if (!name) { process.stderr.write('Usage: pm sprint create "name" [--body "problem statement"]\n'); process.exit(1); }
+        if (!name) { process.stderr.write('Usage: pm project create "name" [--destination "..."] [--body "markdown doc"]\n'); process.exit(1); }
         await resolveBody();
         const body = { name };
-        // --body and --problem-statement both map to problemStatement (API field name)
-        if (flags.body) body.problemStatement = flags.body;
+        if (flags.destination) body.problemStatement = flags.destination;
         if (flags['problem-statement']) body.problemStatement = flags['problem-statement'];
+        // --body is the project's markdown doc (decisions log, out-of-scope, …)
+        if (flags.body) body.body = flags.body;
         await api('POST', '/api/sprints', body);
         break;
       }
-      // pm sprint SPRINT-NNN --name "..." (patch shorthand)
+      // pm project SPRINT-NNN --name "..." (patch shorthand)
       if (action && /^SPRINT-\d+$/i.test(action) && Object.keys(flags).length > 0) {
         await resolveBody();
         const patchBody = {};
         for (const [key, val] of Object.entries(flags)) {
           if (!isRequestFlag(key)) continue;
-          // Accept --body as alias for problemStatement on sprints
-          if (key === 'body' || key === 'problem-statement') patchBody.problemStatement = val;
+          if (key === 'destination' || key === 'problem-statement') patchBody.problemStatement = val;
           else patchBody[key] = val;
         }
         await api('PATCH', `/api/sprints/${action}`, patchBody);
@@ -940,6 +968,10 @@ async function main() {
     case 'concern': {
       const arg = positional[0];
       if (!arg) { process.stderr.write(`Usage: pm ${subcmd} <id or "title">\n`); process.exit(1); }
+      if (arg === 'list') {
+        printList(await fetchListByType(subcmd));
+        break;
+      }
       if (/^[A-Z]+-\d+$/i.test(arg)) {
         if (Object.keys(flags).length > 0) {
           await resolveBody();
@@ -948,6 +980,7 @@ async function main() {
           await api('GET', routeById(arg));
         }
       } else {
+        rejectCommandWordTitle(arg, subcmd);
         await resolveBody();
         await api('POST', '/api/items', buildItemBody(subcmd, arg));
       }

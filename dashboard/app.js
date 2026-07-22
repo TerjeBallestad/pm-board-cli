@@ -33,6 +33,7 @@ const state = {
   testsFilter: "all",
   testsSearch: "",
   testsSort: "directory",
+  stripsExpanded: null, // project id whose doc/exec strips are expanded
 };
 
 // Column stages in board order (overwritten from config at init)
@@ -128,46 +129,25 @@ function splitByFrontier(tickets) {
 }
 
 // ─────────────────────────────────────────────────────────── Projects
-// A project is a promoted sprint or a map document (design with linked tickets).
+// A project IS a sprint (id SPRINT-NNN, labelled "Project"): the container for
+// tickets, designs, and plans via their sprintId. SDDs are design documents,
+// never project containers.
 
 function computeProjects() {
-  const projects = [];
-  for (const s of state.sprints) {
-    const tickets = state.items.filter((i) => i.sprintId === s.id && isTicket(i));
-    projects.push({
-      id: s.id,
-      kind: "sprint",
-      name: s.name || s.id,
-      destination: s.problemStatement || "",
-      status: s.status,
-      tickets,
-      sprint: s,
-    });
-  }
-  for (const d of state.designs) {
-    const linked = d.linkedItems || d.itemIds || [];
-    if (linked.length === 0) continue;
-    const byId = itemsById();
-    const tickets = linked.map((id) => byId.get(id)).filter(Boolean);
-    projects.push({
-      id: d.id,
-      kind: "design",
-      name: displayTitle(d),
-      destination: extractDestination(d.body),
-      status: d.stage === "done" ? "completed" : "active",
-      tickets,
-      design: d,
-      missingCount: linked.length - tickets.length,
-    });
-  }
-  // Active first, then most recently updated
+  const projects = state.sprints.map((s) => ({
+    id: s.id,
+    name: s.name || s.id,
+    destination: s.problemStatement || "",
+    status: s.status,
+    tickets: state.items.filter((i) => i.sprintId === s.id && isTicket(i)),
+    sprint: s,
+  }));
+  // Active first, then most recently created
   projects.sort((a, b) => {
     const aa = a.status === "active" ? 0 : 1;
     const bb = b.status === "active" ? 0 : 1;
     if (aa !== bb) return aa - bb;
-    const au = (a.sprint || a.design || {}).updatedAt || (a.sprint || a.design || {}).createdAt || "";
-    const bu = (b.sprint || b.design || {}).updatedAt || (b.sprint || b.design || {}).createdAt || "";
-    return bu.localeCompare(au);
+    return (b.sprint.createdAt || "").localeCompare(a.sprint.createdAt || "");
   });
   return projects;
 }
@@ -176,19 +156,17 @@ function findProject(id) {
   return computeProjects().find((p) => p.id === id) || null;
 }
 
-/** Progress = resolved/total over the project's tickets (missing linked ids count as resolved). */
+/** Progress = resolved/total over the project's tickets. */
 function projectProgress(p) {
-  const total = p.tickets.length + (p.missingCount || 0);
-  const resolved =
-    p.tickets.filter((t) => isResolvedStage(t.stage)).length + (p.missingCount || 0);
-  return { resolved, total };
+  return {
+    resolved: p.tickets.filter((t) => isResolvedStage(t.stage)).length,
+    total: p.tickets.length,
+  };
 }
 
-/** Pull a "Destination: …" line out of a map document body. */
-function extractDestination(body) {
-  if (!body) return "";
-  const m = /Destination:\s*(.+?)(?:\n\n|\n#|$)/s.exec(body);
-  return m ? m[1].replace(/\n/g, " ").trim() : body.split("\n")[0];
+/** Plans executing a project. */
+function projectPlans(p) {
+  return state.plans.filter((plan) => plan.sprintId === p.id);
 }
 
 // ─────────────────────────────────────────────────────────── Router
@@ -201,6 +179,7 @@ function currentBoardPath() {
     case "tests": return "/tests";
     case "inbox": return "/inbox";
     case "documents": return "/documents";
+    case "plans": return "/plans";
     case "archive": return "/archive";
     case "project": return state.selectedProjectId ? `/project/${state.selectedProjectId}` : "/tickets";
     default: return "/tickets";
@@ -218,6 +197,7 @@ const VIEW_CONTAINERS = {
   project: "projectView",
   inbox: "inboxView",
   documents: "documentsView",
+  plans: "plansView",
   decisions: "decisionsView",
   tests: "testsView",
   archive: "archiveView",
@@ -246,6 +226,7 @@ function renderCurrentView() {
     case "tests": renderTestsView(); break;
     case "inbox": renderInboxView(); break;
     case "documents": renderDocumentsView(); break;
+    case "plans": renderPlansView(); break;
     case "archive": renderArchiveView(); break;
     case "project":
       if (state.projectMode === "board") renderBoard();
@@ -280,6 +261,7 @@ function applyRoute() {
   else if (section === "tests") state.view = "tests";
   else if (section === "inbox") state.view = "inbox";
   else if (section === "documents") state.view = "documents";
+  else if (section === "plans") state.view = "plans";
   else if (section === "archive") state.view = "archive";
   else if ((section === "project" || section === "sprint") && id) {
     state.view = "project";
@@ -780,6 +762,41 @@ function openEntityById(id) {
   if (state.sprints.find((s) => s.id === id)) return showSprintDossier(id);
 }
 
+// ─────────────────────────────────────────────────────────── Start-work commands
+// Copy-to-paste commands come from pm.config.json `commands` — the project's
+// own vocabulary ({id}/{title} placeholders). The dashboard knows nothing
+// about specific skills; no template configured → no button.
+
+function startCommand(entity, type) {
+  const cmds = pmConfig.commands || {};
+  let tpl = null;
+  if (type === "item") {
+    const t = cmds.ticket || {};
+    tpl = t[ticketKind(entity)] || t.default || null;
+  } else if (type === "design") tpl = cmds.sdd || null;
+  else if (type === "plan") tpl = cmds.plan || null;
+  else if (type === "project") tpl = cmds.project || null;
+  if (!tpl) return null;
+  return tpl
+    .replaceAll("{id}", entity.id || "")
+    .replaceAll("{title}", displayTitle(entity));
+}
+
+function startButtonHTML(entity, type) {
+  const cmd = startCommand(entity, type);
+  if (!cmd) return "";
+  return `<button class="btn btn-primary btn-sm" id="startCmdBtn" title="${escAttr(cmd)}">⧉ Start</button>`;
+}
+
+function wireStartButton(entity, type) {
+  const btn = document.getElementById("startCmdBtn");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const cmd = startCommand(entity, type);
+    if (cmd) copyToClipboard(cmd, `Copied: ${cmd}`);
+  });
+}
+
 // ─────────────────────────────────────────────────────────── Toast
 
 function showToast(message, type = "success") {
@@ -848,9 +865,8 @@ function navCounts() {
   return {
     inbox: openTickets.filter((i) => i.stage === "inbox").length,
     tickets: openTickets.length,
-    documents:
-      state.designs.filter((d) => d.stage !== "done").length +
-      state.plans.filter((p) => p.stage !== "done").length,
+    documents: state.designs.filter((d) => d.stage !== "done").length,
+    plans: state.plans.filter((p) => p.stage !== "done").length,
     decisions: state.items.filter((i) => i.type === "decision").length,
   };
 }
@@ -864,6 +880,7 @@ function renderSidebar() {
     { view: "inbox", label: "Inbox", count: counts.inbox, swatch: "swatch-dashed" },
     { view: "tickets", label: "Tickets", count: counts.tickets, swatch: "swatch-neutral" },
     { view: "documents", label: "Documents", count: counts.documents, swatch: "swatch-indigo" },
+    { view: "plans", label: "Plans", count: counts.plans, swatch: "swatch-green" },
     { view: "decisions", label: "Decisions", count: counts.decisions, swatch: "swatch-blue" },
     { view: "tests", label: "Tests", count: null, swatch: "swatch-neutral" },
     { view: "archive", label: "Archive", count: null, swatch: "swatch-neutral" },
@@ -956,6 +973,7 @@ const VIEW_TITLES = {
   tickets: "Tickets",
   inbox: "Inbox",
   documents: "Documents",
+  plans: "Plans",
   decisions: "Decisions",
   tests: "Tests",
   archive: "Archive",
@@ -974,17 +992,13 @@ function renderTopbar() {
     if (!p) {
       leftHTML = `<span class="topbar-title">Project</span>`;
     } else {
-      const sddLink =
-        p.kind === "design"
-          ? `<button class="topbar-doclink" id="topbarSddLink">${escText(p.id)} ↗</button>`
-          : `<span class="topbar-sub">${escText(p.id)}</span>`;
-      leftHTML = `<span class="topbar-title">${escText(p.name)}</span>${sddLink}`;
+      leftHTML = `<span class="topbar-title">${escText(p.name)}</span><button class="topbar-doclink" id="topbarProjectDoc">${escText(p.id)} ↗</button>`;
       togglesHTML = `
         <div class="seg-toggle">
           <button class="seg${state.projectMode === "map" ? " seg-active" : ""}" data-mode="map">Map</button>
           <button class="seg${state.projectMode === "board" ? " seg-active" : ""}" data-mode="board">Board</button>
         </div>`;
-      if (p.kind === "sprint" && p.status === "active") {
+      if (p.status === "active") {
         extraActions = `
           <button class="btn btn-ghost btn-sm" id="exploreSprintBtn">Explore</button>
           <button class="btn btn-ghost btn-sm" id="endSprintBtn">End</button>`;
@@ -995,6 +1009,7 @@ function renderTopbar() {
     const sub =
       state.view === "tickets" ? `<span class="topbar-sub">${counts.tickets} open</span>` :
       state.view === "inbox" ? `<span class="topbar-sub">${counts.inbox} waiting</span>` :
+      state.view === "plans" ? `<span class="topbar-sub">${counts.plans} in flight</span>` :
       state.view === "decisions" ? `<span class="topbar-sub">${counts.decisions} · newest carry the weight</span>` :
       "";
     leftHTML = `<span class="topbar-title">${VIEW_TITLES[state.view] || ""}</span>${sub}`;
@@ -1026,8 +1041,8 @@ function renderTopbar() {
       renderCurrentView();
     });
   });
-  document.getElementById("topbarSddLink")?.addEventListener("click", () => {
-    showSddDetail(state.selectedProjectId);
+  document.getElementById("topbarProjectDoc")?.addEventListener("click", () => {
+    showProjectDoc(state.selectedProjectId);
   });
   document.getElementById("exploreSprintBtn")?.addEventListener("click", () => {
     if (state.selectedProjectId) showSprintDossier(state.selectedProjectId);
@@ -1042,6 +1057,7 @@ function renderActiveContent() {
     case "tests": applyTestsFilters(); break;
     case "inbox": renderInboxView(); break;
     case "documents": renderDocumentsView(); break;
+    case "plans": renderPlansView(); break;
     case "archive": renderArchiveView(); break;
     case "project":
       if (state.projectMode === "board") renderBoard();
@@ -1055,7 +1071,9 @@ function renderActiveContent() {
 
 async function endActiveSprint() {
   const p = findProject(state.selectedProjectId);
-  if (!p || p.kind !== "sprint") return;
+  if (!p) return;
+  const { resolved, total } = projectProgress(p);
+  if (total - resolved > 0 && !confirm(`Complete ${p.id}? ${total - resolved} open ticket(s) will be marked done.`)) return;
   try {
     await apiFetch(`/api/sprints/${p.id}`, {
       method: "PATCH",
@@ -1173,12 +1191,9 @@ function boardScopeTickets() {
   // In project-board mode, restrict to the project's entities
   if (state.view === "project") {
     const p = findProject(state.selectedProjectId);
-    if (p) {
-      const ids = new Set(p.tickets.map((t) => t.id));
-      return { project: p, ids };
-    }
+    if (p) return { project: p };
   }
-  return { project: null, ids: null };
+  return { project: null };
 }
 
 function renderBoard() {
@@ -1230,8 +1245,7 @@ function renderBoard() {
     if (scope.project) {
       filtered = filtered.filter((c) => {
         const e = c.entity;
-        if (scope.ids.has(e.id)) return true;
-        if (scope.project.kind === "sprint" && e.sprintId === scope.project.id) return true;
+        if (e.sprintId === scope.project.id) return true;
         if (stage === "inbox" && !e.sprintId) return true;
         return false;
       });
@@ -1349,9 +1363,9 @@ function initDragAndDrop() {
 
       try {
         const patchData = { stage: targetStage };
-        // Dragging within a sprint-project board assigns unassigned entities to it
+        // Dragging within a project board assigns unassigned entities to it
         const scope = boardScopeTickets();
-        if (scope.project && scope.project.kind === "sprint") {
+        if (scope.project) {
           let entity = null;
           if (data.type === "item") entity = state.items.find((i) => i.id === data.id);
           else if (data.type === "design") entity = state.designs.find((d) => d.id === data.id);
@@ -1465,7 +1479,65 @@ function renderProjectView() {
   const resolvedShown = resolved.slice(0, 8);
   const resolvedMore = resolved.length - resolvedShown.length;
 
+  // Docs & execution strips — the project's own SDDs and plans (via sprintId).
+  // Plans are agent machinery: compact chips, done ones dimmed at the end.
+  // Old-structure projects can hold dozens — cap at 4 until expanded.
+  const STRIP_CAP = 4;
+  const expanded = state.stripsExpanded === p.id;
+  const capChips = (arr) => (expanded ? arr : arr.slice(0, STRIP_CAP));
+  const moreChip = (arr, kindLabel) =>
+    !expanded && arr.length > STRIP_CAP
+      ? `<button class="exec-plan exec-more" data-expand-strips="1">+ ${arr.length - STRIP_CAP} more ${kindLabel}</button>`
+      : "";
+  const projDesigns = state.designs
+    .filter((d) => d.sprintId === p.id)
+    .sort((a, b) => (a.stage === "done") - (b.stage === "done") || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+  const docsHTML = projDesigns.length
+    ? `<div class="exec-strip">
+        <span class="exec-label">Documents</span>
+        ${capChips(projDesigns)
+          .map(
+            (d) => `
+            <button class="exec-plan exec-doc${d.stage === "done" ? " exec-done" : ""}" data-sdd-id="${escAttr(d.id)}">
+              <span class="exec-id" style="color:#7b83eb">${escText(d.id)}</span>
+              <span class="exec-title">${escText(displayTitle(d))}</span>
+            </button>`,
+          )
+          .join("")}
+        ${moreChip(projDesigns, "docs")}
+      </div>`
+    : "";
+
+  const plans = projectPlans(p).sort(
+    (a, b) => (a.stage === "done") - (b.stage === "done") || (b.updatedAt || "").localeCompare(a.updatedAt || ""),
+  );
+  const execHTML = plans.length
+    ? `<div class="exec-strip">
+        <span class="exec-label">Execution</span>
+        ${capChips(plans)
+          .map((pl) => {
+            const tasks = pl.tasks || [];
+            const done = tasks.filter((t) => t.status === "done").length;
+            const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
+            const ralphLive = state.ralphLoops.some((l) => l.alive && l.planId === pl.id);
+            return `
+            <button class="exec-plan${pl.stage === "done" ? " exec-done" : ""}" data-plan-id="${escAttr(pl.id)}">
+              ${ralphLive ? '<span class="ralph-dot"></span>' : ""}
+              <span class="exec-id">${escText(pl.id)}</span>
+              <span class="exec-title">${escText(displayTitle(pl))}</span>
+              <span class="exec-bar"><span style="width:${pct}%"></span></span>
+              <span class="exec-nums">${done}/${tasks.length}</span>
+            </button>`;
+          })
+          .join("")}
+        ${moreChip(plans, "plans")}
+      </div>`
+    : "";
+
   container.innerHTML = `
+    ${docsHTML}
+    ${execHTML}
+    <div class="pcols">
     <div class="pcol">
       <div class="pcol-header">
         <span class="pcol-dot pcol-dot-frontier"></span>
@@ -1500,10 +1572,23 @@ function renderProjectView() {
         ${resolvedMore > 0 ? `<div class="pcol-more">+ ${resolvedMore} more</div>` : ""}
       </div>
     </div>
+    </div>
   `;
 
   container.querySelectorAll(".pcard[data-id]").forEach((el) => {
     el.addEventListener("click", () => showDetailOverlay(el.dataset.id));
+  });
+  container.querySelectorAll(".exec-plan[data-plan-id]").forEach((el) => {
+    el.addEventListener("click", () => showPlanDetail(el.dataset.planId));
+  });
+  container.querySelectorAll(".exec-doc[data-sdd-id]").forEach((el) => {
+    el.addEventListener("click", () => showSddDetail(el.dataset.sddId));
+  });
+  container.querySelectorAll("[data-expand-strips]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.stripsExpanded = p.id;
+      renderProjectView();
+    });
   });
 }
 
@@ -1579,8 +1664,9 @@ function renderDocumentsView() {
   const container = document.getElementById("documentsView");
   if (!container) return;
 
+  // Plans are project machinery, not documents — they live on the project home
+  // (execution strip) and via ⌘K, never here.
   const designs = state.designs.filter(matchesSearch);
-  const plans = state.plans.filter(matchesSearch);
 
   const designRows = designs
     .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
@@ -1597,36 +1683,69 @@ function renderDocumentsView() {
     })
     .join("");
 
-  const planRows = plans
-    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
-    .map((p) => {
-      const tasks = p.tasks || [];
-      const done = tasks.filter((t) => t.status === "done").length;
-      const ralphLive = state.ralphLoops.some((l) => l.alive && l.planId === p.id);
-      return `
-      <div class="lrow${p.stage === "done" ? " lrow-done" : ""}" data-id="${escAttr(p.id)}" data-kind="plan">
-        <span class="lrow-id" style="color:#46c288">${escText(p.id)}</span>
-        <span class="lrow-title">${escText(displayTitle(p))}</span>
-        <span class="lrow-meta">${tasks.length ? `${done}/${tasks.length} tasks` : ""}${ralphLive ? '<span class="lrow-sep">·</span><span class="lrow-ralph">ralph live</span>' : ""}</span>
-        <span class="lrow-age">${shortTime(p.updatedAt)}</span>
-      </div>`;
-    })
-    .join("");
-
   container.innerHTML = `
     <div class="list-pane">
       <div class="list-group-title"><span class="list-group-dot" style="background:#7b83eb"></span>Maps &amp; designs <span class="list-group-count">${designs.length}</span></div>
       ${designRows || '<div class="view-empty-inline">No design documents.</div>'}
-      <div class="list-group-title"><span class="list-group-dot" style="background:#46c288"></span>Plans <span class="list-group-count">${plans.length}</span></div>
-      ${planRows || '<div class="view-empty-inline">No plans.</div>'}
     </div>
   `;
 
   container.querySelectorAll(".lrow[data-id]").forEach((el) => {
-    el.addEventListener("click", () => {
-      if (el.dataset.kind === "design") showSddDetail(el.dataset.id);
-      else showPlanDetail(el.dataset.id);
-    });
+    el.addEventListener("click", () => showSddDetail(el.dataset.id));
+  });
+}
+
+// ─────────────────────────────────────────────────────────── Plans view
+
+function renderPlansView() {
+  const container = document.getElementById("plansView");
+  if (!container) return;
+
+  const plans = state.plans.filter(matchesSearch);
+  if (plans.length === 0) {
+    container.innerHTML = '<div class="view-empty">No plans.</div>';
+    return;
+  }
+
+  const projectName = (sprintId) => {
+    const s = state.sprints.find((sp) => sp.id === sprintId);
+    return s ? s.name : null;
+  };
+
+  const active = plans.filter((p) => p.stage !== "done");
+  const done = plans.filter((p) => p.stage === "done");
+
+  const row = (p) => {
+    const tasks = p.tasks || [];
+    const doneCount = tasks.filter((t) => t.status === "done").length;
+    const ralphLive = state.ralphLoops.some((l) => l.alive && l.planId === p.id);
+    const proj = projectName(p.sprintId);
+    const metaBits = [];
+    if (tasks.length) metaBits.push(`${doneCount}/${tasks.length} tasks`);
+    if (ralphLive) metaBits.push('<span class="lrow-ralph">ralph live</span>');
+    if (proj) metaBits.push(escText(proj));
+    return `
+    <div class="lrow${p.stage === "done" ? " lrow-done" : ""}" data-id="${escAttr(p.id)}">
+      <span class="lrow-id" style="color:#46c288">${escText(p.id)}</span>
+      <span class="lrow-title">${escText(displayTitle(p))}</span>
+      <span class="lrow-meta">${metaBits.join('<span class="lrow-sep">·</span>')}</span>
+      <span class="lrow-age">${shortTime(p.updatedAt)}</span>
+    </div>`;
+  };
+
+  const sortRows = (arr) =>
+    arr.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "")).map(row).join("");
+
+  container.innerHTML = `
+    <div class="list-pane">
+      <div class="list-group-title"><span class="list-group-dot" style="background:#46c288"></span>In flight <span class="list-group-count">${active.length}</span></div>
+      ${sortRows(active) || '<div class="view-empty-inline">Nothing executing.</div>'}
+      ${done.length ? `<div class="list-group-title"><span class="list-group-dot" style="background:#3b3e4d"></span>Done <span class="list-group-count">${done.length}</span></div>${sortRows(done)}` : ""}
+    </div>
+  `;
+
+  container.querySelectorAll(".lrow[data-id]").forEach((el) => {
+    el.addEventListener("click", () => showPlanDetail(el.dataset.id));
   });
 }
 
@@ -2340,34 +2459,6 @@ async function generateAndShowPrompt(opts, previewEl) {
   }
 }
 
-async function generateAndShowReviewPrompt(opts, previewEl) {
-  previewEl.classList.remove("hidden");
-  previewEl.innerHTML =
-    '<span style="color:var(--text-3)">Generating review prompt (includes QMD queries)...</span>';
-  try {
-    const result = await apiFetch("/api/context/review", {
-      method: "POST",
-      body: JSON.stringify(opts),
-    });
-    const promptText = result.prompt || "(empty)";
-    previewEl.innerHTML = `
-      <pre class="prompt-text">${escText(promptText)}</pre>
-      <button class="btn btn-primary btn-sm prompt-copy-btn">Copy to Clipboard</button>
-    `;
-    previewEl
-      .querySelector(".prompt-copy-btn")
-      .addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(promptText);
-          showToast("Review prompt copied!");
-        } catch {
-          showToast("Copy failed", "error");
-        }
-      });
-  } catch (err) {
-    previewEl.innerHTML = `<span style="color:var(--danger)">Error: ${escText(err.message)}</span>`;
-  }
-}
 
 function showPromptPreview(text, previewEl) {
   previewEl.classList.remove("hidden");
@@ -2447,6 +2538,110 @@ async function showSprintDossier(sprintId) {
   }
 }
 
+// ─────────────────────────────────────────────────────────── Project doc slide-over
+// The project's own document: destination + markdown body (decisions log,
+// out-of-scope, …) + comment thread. This is what map SDDs used to carry.
+
+function showProjectDoc(sprintId) {
+  const sprint = state.sprints.find((s) => s.id === sprintId);
+  if (!sprint) return;
+  const overlay = document.getElementById("detailOverlay");
+  const content = document.getElementById("detailContent");
+  if (!overlay || !content) return;
+
+  const p = findProject(sprintId);
+  const { resolved, total } = projectProgress(p);
+
+  const destHTML = sprint.problemStatement
+    ? `<div class="detail-body"><blockquote><p><strong>Destination:</strong> ${escText(sprint.problemStatement)}</p></blockquote></div>`
+    : "";
+  const bodyHTML = sprint.body
+    ? mdToHtml(sprint.body)
+    : '<p style="color:var(--text-3)">No project doc yet — decisions log and out-of-scope live here.</p>';
+
+  content.innerHTML = `
+    <div class="slide-header">
+      <span class="slide-id" style="color:#7b83eb">${escText(sprint.id)}</span>
+      <span class="slide-typechip" style="color:#7b83eb;background:rgba(123,131,235,.12)">Project</span>
+      <span class="slide-updated">${resolved}/${total} resolved${sprint.status === "completed" ? " · completed" : ""}</span>
+      <div class="slide-actions">
+        ${startButtonHTML(sprint, "project")}
+        <button class="slide-close" id="detailBack">&times;</button>
+      </div>
+    </div>
+    <div class="slide-body">
+      <h1 class="slide-doc-title">${escText(sprint.name || sprint.id)}</h1>
+      ${destHTML}
+      <div class="detail-body-wrapper">
+        <div class="detail-body-toolbar">
+          <button class="btn btn-ghost btn-sm" id="editBodyBtn">Edit</button>
+        </div>
+        <div class="detail-body" id="detailBody">${bodyHTML}</div>
+        <div class="detail-body-edit hidden" id="detailBodyEdit">
+          <textarea id="detailBodyTextarea" rows="14" placeholder="Markdown — decisions log, out of scope…">${escText(sprint.body || "")}</textarea>
+          <div class="detail-body-edit-actions">
+            <button class="btn btn-secondary btn-sm" id="cancelBodyBtn">Cancel</button>
+            <button class="btn btn-primary btn-sm" id="saveBodyBtn">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="slide-thread" id="commentThread"></div>
+  `;
+
+  overlay.classList.remove("hidden");
+  wireEntityRefs(document.getElementById("detailBody"));
+
+  renderComments(
+    sprint.comments || [],
+    "sprints",
+    sprint.id,
+    document.getElementById("commentThread"),
+    async () => {
+      try {
+        const updated = await apiFetch(`/api/sprints/${sprint.id}`);
+        upsertInState("sprint", sprint.id, updated);
+      } catch { /* fall through */ }
+      showProjectDoc(sprint.id);
+    },
+  );
+
+  wireStartButton(sprint, "project");
+  document.getElementById("detailBack").addEventListener("click", () => closeDetailOverlay());
+
+  const bodyDisplay = document.getElementById("detailBody");
+  const bodyEditWrap = document.getElementById("detailBodyEdit");
+  const bodyTextarea = document.getElementById("detailBodyTextarea");
+  const editBodyBtn = document.getElementById("editBodyBtn");
+
+  editBodyBtn.addEventListener("click", () => {
+    bodyDisplay.classList.add("hidden");
+    bodyEditWrap.classList.remove("hidden");
+    editBodyBtn.classList.add("hidden");
+    bodyTextarea.focus();
+  });
+  document.getElementById("cancelBodyBtn").addEventListener("click", () => {
+    bodyTextarea.value = sprint.body || "";
+    bodyEditWrap.classList.add("hidden");
+    bodyDisplay.classList.remove("hidden");
+    editBodyBtn.classList.remove("hidden");
+  });
+  document.getElementById("saveBodyBtn").addEventListener("click", async () => {
+    try {
+      const updated = await apiFetch(`/api/sprints/${sprint.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ body: bodyTextarea.value }),
+      });
+      upsertInState("sprint", sprint.id, updated);
+      showToast("Project doc updated");
+      showProjectDoc(sprint.id);
+    } catch (err) {
+      /* toasted */
+    }
+  });
+  initImageUpload(bodyTextarea);
+}
+
 // ─────────────────────────────────────────────────────────── Slide-over detail (items)
 
 function showDetailOverlay(itemId) {
@@ -2505,19 +2700,14 @@ function showDetailOverlay(itemId) {
         .join("")}</div>`
     : "";
 
-  const explorationBtn =
-    item.stage === "exploring"
-      ? '<button class="btn btn-ghost btn-sm" id="explorePromptBtn">Exploration prompt</button>'
-      : "";
-
   content.innerHTML = `
     <div class="slide-header">
       <span class="slide-id" style="color:${chipColor}">${escText(item.id)}</span>
       <span class="slide-typechip" style="color:${chipColor};background:${chipColor}1f">${escText(chipLabel)}</span>
       <span class="slide-updated">updated ${relativeTime(item.updatedAt)}</span>
       <div class="slide-actions">
+        ${startButtonHTML(item, "item")}
         <button class="btn btn-ghost btn-sm" id="generatePromptBtn">/prompt</button>
-        ${explorationBtn}
         <button class="btn btn-ghost btn-sm btn-danger-ghost" id="archiveBtn">Archive</button>
         <button class="slide-close" id="detailBack">&times;</button>
       </div>
@@ -2675,6 +2865,7 @@ function showDetailOverlay(itemId) {
     el.addEventListener("click", () => openEntityById(el.dataset.ref));
   });
 
+  wireStartButton(item, "item");
   document.getElementById("generatePromptBtn").addEventListener("click", () => {
     generateAndShowPrompt(
       { entityType: "item", entityId: item.id, includeQmd: true },
@@ -2682,37 +2873,6 @@ function showDetailOverlay(itemId) {
     );
   });
 
-  const exploreBtn = document.getElementById("explorePromptBtn");
-  if (exploreBtn) {
-    exploreBtn.addEventListener("click", () => {
-      const prompt = [
-        `# Exploration Prompt for ${item.id}: ${item.title}`,
-        "",
-        `## Objective`,
-        `Investigate and explore the following item to gather enough information for SDD creation.`,
-        "",
-        `## Item Details`,
-        `- **ID:** ${item.id}`,
-        `- **Title:** ${item.title}`,
-        `- **Type:** ${item.type || "N/A"}`,
-        `- **Priority:** ${item.priority || "N/A"}`,
-        "",
-        `## Description`,
-        item.body || "(no description)",
-        "",
-        `## Affected Files`,
-        (item.affectedFiles || []).map((f) => `- ${f}`).join("\n") || "(none)",
-        "",
-        `## Investigation Tasks`,
-        `1. Identify the root cause or core requirements`,
-        `2. Map affected code paths and dependencies`,
-        `3. Document edge cases and constraints`,
-        `4. Propose solution approaches with trade-offs`,
-        `5. Recommend next steps (SDD creation or further exploration)`,
-      ].join("\n");
-      showPromptPreview(prompt, document.getElementById("promptPreview"));
-    });
-  }
 
   document.getElementById("archiveBtn").addEventListener("click", async () => {
     try {
@@ -2801,10 +2961,8 @@ function showSddDetail(sddId) {
       <span class="slide-typechip" style="color:#7b83eb;background:rgba(123,131,235,.12)">Map</span>
       <span class="slide-updated">updated ${relativeTime(sdd.updatedAt)}</span>
       <div class="slide-actions">
+        ${startButtonHTML(sdd, "design")}
         <button class="btn btn-ghost btn-sm" id="generatePromptBtn">/prompt</button>
-        <button class="btn btn-ghost btn-sm" id="reviewPromptBtn">/review</button>
-        <button class="btn btn-ghost btn-sm" id="createPlanBtn">/plan</button>
-        <button class="btn btn-ghost btn-sm" id="generateSddPromptBtn">SDD prompt</button>
         ${sdd.body ? '<button class="btn btn-ghost btn-sm" id="graduateDdBtn">Graduate → DD</button>' : ""}
         <button class="slide-close" id="detailBack">&times;</button>
       </div>
@@ -2886,6 +3044,7 @@ function showSddDetail(sddId) {
     el.addEventListener("click", () => showDetailOverlay(el.dataset.ref));
   });
 
+  wireStartButton(sdd, "design");
   document.getElementById("generatePromptBtn").addEventListener("click", () => {
     generateAndShowPrompt(
       { entityType: "sdd", entityId: sdd.id, includeQmd: true },
@@ -2893,57 +3052,8 @@ function showSddDetail(sddId) {
     );
   });
 
-  document
-    .getElementById("generateSddPromptBtn")
-    .addEventListener("click", () => {
-      const linkedInfo = linkedEntities
-        .map(
-          (item) =>
-            `- **${item.id}**: ${item.title}${item.body ? "\n  " + item.body.split("\n")[0] : ""}`,
-        )
-        .join("\n");
-      const prompt = [
-        `# SDD Generation Prompt`,
-        "",
-        `## Task`,
-        `Write a Software Design Document (SDD) for: **${sdd.title || sdd.name || sdd.id}**`,
-        "",
-        `## Linked Items`,
-        linkedInfo || "(no linked items)",
-        "",
-        `## Current SDD Body`,
-        sdd.body || "(empty — write from scratch)",
-        "",
-        `## SDD Template`,
-        `Please produce an SDD with:`,
-        `1. **Problem Statement** — what problem does this solve?`,
-        `2. **Proposed Solution** — high-level approach`,
-        `3. **Technical Design** — data structures, APIs, algorithms`,
-        `4. **Affected Files** — which files need changes`,
-        `5. **Testing Strategy** — how to verify correctness`,
-        `6. **Open Questions** — unresolved decisions`,
-      ].join("\n");
-      showPromptPreview(prompt, document.getElementById("promptPreview"));
-    });
 
-  document.getElementById("reviewPromptBtn").addEventListener("click", () => {
-    generateAndShowReviewPrompt(
-      { entityType: "sdd", entityId: sdd.id },
-      document.getElementById("promptPreview"),
-    );
-  });
 
-  document.getElementById("createPlanBtn").addEventListener("click", () => {
-    const activeSprint = state.sprints?.find((s) => s.status === "active");
-    const lines = [`/plan ${sdd.id}`];
-    if (activeSprint) {
-      lines.push("", `Sprint: ${activeSprint.id} — ${activeSprint.title || activeSprint.problem || ""}`);
-    }
-    if (linkedItemIds.length > 0) {
-      lines.push("", `Linked items: ${linkedItemIds.join(", ")}`);
-    }
-    showPromptPreview(lines.join("\n"), document.getElementById("promptPreview"));
-  });
 
   const graduateBtn = document.getElementById("graduateDdBtn");
   if (graduateBtn) {
@@ -3107,9 +3217,8 @@ async function showPlanDetail(planId) {
       <span class="slide-updated">updated ${relativeTime(plan.updatedAt)}</span>
       ${ralphHTML}
       <div class="slide-actions">
+        ${startButtonHTML(plan, "plan")}
         <button class="btn btn-ghost btn-sm" id="generatePromptBtn">/prompt</button>
-        <button class="btn btn-ghost btn-sm" id="reviewPromptBtn">/review</button>
-        <button class="btn btn-ghost btn-sm" id="exportRalphBtn">/ralph</button>
         <button class="slide-close" id="detailBack">&times;</button>
       </div>
     </div>
@@ -3197,6 +3306,7 @@ async function showPlanDetail(planId) {
     });
   });
 
+  wireStartButton(plan, "plan");
   document.getElementById("generatePromptBtn").addEventListener("click", () => {
     generateAndShowPrompt(
       { entityType: "plan", entityId: plan.id, includeQmd: true },
@@ -3204,17 +3314,7 @@ async function showPlanDetail(planId) {
     );
   });
 
-  document.getElementById("reviewPromptBtn").addEventListener("click", () => {
-    generateAndShowReviewPrompt(
-      { entityType: "plan", entityId: plan.id },
-      document.getElementById("promptPreview"),
-    );
-  });
 
-  document.getElementById("exportRalphBtn").addEventListener("click", () => {
-    const cmd = `./ralph.sh 10 ${plan.id}`;
-    copyToClipboard(cmd, "Ralph command copied!");
-  });
 
   const ralphStopBtn = document.getElementById("ralphStopBtn");
   if (ralphStopBtn) {
@@ -3413,7 +3513,7 @@ function initEvents() {
       // Assign to the open sprint-project
       if (state.view === "project") {
         const p = findProject(state.selectedProjectId);
-        if (p && p.kind === "sprint") data.sprintId = p.id;
+        if (p) data.sprintId = p.id;
       }
       try {
         const created = await apiFetch("/api/items", {

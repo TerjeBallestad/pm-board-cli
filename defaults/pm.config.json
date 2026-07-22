@@ -14,6 +14,14 @@
     "TASK":  { "label": "Task" },
     "MILESTONE": { "label": "Milestone" }
   },
+  "commands": {
+    "ticket": {
+      "default": "Work the PM ticket {id}: {title}"
+    },
+    "sdd": "Work the PM design doc {id}: {title}",
+    "plan": "Execute PM plan {id}",
+    "project": "Work the frontier of PM project {id}"
+  },
   "knowledgeBase": {
     "command": "qmd query",
     "scope": null

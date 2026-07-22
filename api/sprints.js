@@ -19,13 +19,15 @@ export const getSprint = (req, res) => {
 };
 
 export const createSprint = (req, res) => {
-  const { name, problemStatement } = req.body;
+  const { name, problemStatement, body } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const id = store.nextId('SPRINT');
   const now = new Date().toISOString();
   const sprint = {
     id, name,
     problemStatement: problemStatement || '',
+    body: body || '',
+    comments: [],
     status: 'active',
     createdAt: now,
     completedAt: null
@@ -38,7 +40,7 @@ export const createSprint = (req, res) => {
 export const patchSprint = (req, res) => {
   const sprint = store.get().sprints.find(s => s.id === req.params.id);
   if (!sprint) return res.status(404).json({ error: 'Not found' });
-  const allowed = ['name', 'problemStatement', 'status'];
+  const allowed = ['name', 'problemStatement', 'body', 'status'];
   for (const key of allowed) {
     if (req.body[key] !== undefined) sprint[key] = req.body[key];
   }
@@ -192,6 +194,23 @@ export const addSprintItems = (req, res) => {
   res.json({ added: count });
 };
 
+export const addSprintComment = (req, res) => {
+  const sprint = store.get().sprints.find(s => s.id === req.params.id);
+  if (!sprint) return res.status(404).json({ error: 'Not found' });
+  const { author, text } = req.body;
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const comment = {
+    id: `c${Date.now()}`,
+    author: author || 'user',
+    text,
+    createdAt: new Date().toISOString()
+  };
+  if (!Array.isArray(sprint.comments)) sprint.comments = [];
+  sprint.comments.push(comment);
+  store.writeEntity('sprints', sprint.id, sprint);
+  res.status(201).json(comment);
+};
+
 router.get('/', listSprints);
 router.get('/:id', getSprint);
 router.post('/', createSprint);
@@ -199,5 +218,6 @@ router.patch('/:id', patchSprint);
 router.post('/:id/suggest', suggestSprintItems);
 router.post('/:id/explore', exploreSprint);
 router.post('/:id/items', addSprintItems);
+router.post('/:id/comments', addSprintComment);
 
 export default router;
