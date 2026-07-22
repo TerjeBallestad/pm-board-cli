@@ -6,35 +6,65 @@
 <title>PM Board</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
-<header class="header">
-  <h1 id="projectTitle">PM Board</h1>
-  <div class="sprint-tabs" id="sprintInfo">
-    <!-- populated by renderSprintTabs() -->
-  </div>
-  <div class="header-actions">
-    <div class="type-filters" id="typeFilters">
-      <!-- populated dynamically from /api/config -->
+<div class="shell">
+
+  <!-- ── Left sidebar ─────────────────────────────────────────── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-mark"></div>
+      <span class="brand-name" id="projectTitle">PM Board</span>
     </div>
-    <input type="search" class="search-box" id="searchBox" placeholder="Search...">
-    <button class="btn btn-secondary hidden" id="exploreSprintBtn">Explore</button>
-    <button class="btn btn-primary" id="sprintBtn">+ Sprint</button>
+    <button class="sidebar-search" id="sidebarSearchBtn">
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <nav class="sidebar-nav" id="sidebarNav">
+      <!-- populated by renderSidebar() -->
+    </nav>
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Projects <button class="sidebar-section-action" id="newProjectBtn" title="Start sprint">+</button></div>
+      <div class="sidebar-projects" id="sidebarProjects"></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Kinds</div>
+      <div class="sidebar-kinds" id="sidebarKinds"></div>
+    </div>
+  </aside>
+
+  <!-- ── Main column ──────────────────────────────────────────── -->
+  <div class="main">
+    <div class="topbar" id="topbar">
+      <!-- populated by renderTopbar() -->
+    </div>
+    <div class="project-strip hidden" id="projectStrip">
+      <!-- destination strip, populated by renderProjectView() -->
+    </div>
+    <div class="view-root">
+      <main class="kanban hidden" id="kanbanBoard"></main>
+      <main class="project-view hidden" id="projectView"></main>
+      <main class="inbox-view hidden" id="inboxView"></main>
+      <main class="documents-view hidden" id="documentsView"></main>
+      <main class="decisions-view hidden" id="decisionsView"></main>
+      <main class="tests-view hidden" id="testsView"></main>
+      <main class="archive-view hidden" id="archiveView"></main>
+    </div>
   </div>
-</header>
 
-<main class="kanban" id="kanbanBoard">
-  <!-- columns populated dynamically from /api/config stages -->
-</main>
+  <!-- ── Right rail ───────────────────────────────────────────── -->
+  <aside class="rail" id="rail">
+    <div class="rail-needs hidden" id="railNeeds"></div>
+    <div class="rail-activity-title">Activity</div>
+    <div class="rail-activity" id="railActivity"></div>
+  </aside>
 
-<main class="decisions-view hidden" id="decisionsView"></main>
+</div>
 
-<main class="tests-view hidden" id="testsView"></main>
-
-<!-- Full-screen detail overlay -->
+<!-- Slide-over detail panel -->
 <div class="overlay hidden" id="detailOverlay">
   <div class="overlay-content" id="detailContent"></div>
 </div>
@@ -43,21 +73,31 @@
 <div class="modal-backdrop hidden" id="modalBackdrop">
   <div class="modal">
     <div class="modal-header">
-      <h2>New Item</h2>
+      <h2>New Ticket</h2>
       <button class="modal-close" id="modalClose">&times;</button>
     </div>
     <form id="newItemForm">
-      <div class="form-row">
-        <label>Type</label>
-        <select name="type" id="itemTypeSelect">
-          <!-- populated from config -->
-        </select>
+      <div class="form-row form-row-split">
+        <div>
+          <label>Type</label>
+          <select name="type" id="itemTypeSelect"></select>
+        </div>
+        <div>
+          <label>Kind</label>
+          <select name="kind" id="itemKindSelect">
+            <option value="">—</option>
+            <option value="research">research</option>
+            <option value="probe">probe</option>
+            <option value="grill">grill</option>
+            <option value="task">task</option>
+          </select>
+        </div>
+        <div>
+          <label>Priority</label>
+          <select name="priority"><option value="">—</option><option value="critical">Critical</option><option value="balance">Balance</option><option value="feature">Feature</option><option value="polish">Polish</option></select>
+        </div>
       </div>
-      <div class="form-row">
-        <label>Priority</label>
-        <select name="priority"><option value="">—</option><option value="critical">Critical</option><option value="balance">Balance</option><option value="feature">Feature</option><option value="polish">Polish</option></select>
-      </div>
-      <div class="form-row">
+      <div class="form-row hidden">
         <label>Pillar</label>
         <select name="pillar" id="fieldPillar"><option value="">--</option></select>
       </div>
@@ -81,21 +121,21 @@
 <div class="modal-backdrop hidden" id="sprintModalBackdrop">
   <div class="modal">
     <div class="modal-header">
-      <h2>Start Sprint</h2>
+      <h2>Start Project</h2>
       <button class="modal-close" id="sprintModalClose">&times;</button>
     </div>
     <form id="sprintForm">
       <div class="form-row">
-        <label>Sprint Name *</label>
+        <label>Name *</label>
         <input type="text" name="name" required placeholder="e.g. Fix energy balance">
       </div>
       <div class="form-row">
-        <label>Problem Statement</label>
-        <textarea name="problemStatement" rows="4" placeholder="Describe the problem or design challenge..."></textarea>
+        <label>Destination</label>
+        <textarea name="problemStatement" rows="4" placeholder="Where does this project arrive? What does done look like?"></textarea>
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" id="sprintModalCancel">Cancel</button>
-        <button type="submit" class="btn btn-primary">Start Sprint</button>
+        <button type="submit" class="btn btn-primary">Start</button>
       </div>
     </form>
   </div>

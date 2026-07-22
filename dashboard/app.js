@@ -1,6 +1,7 @@
 /* ══════════════════════════════════════════════════════════════════════════
-   PM Board — Sprint Cockpit Dashboard
-   app.js — kanban rendering, drag-drop, item detail overlay
+   PM Board — tickets · documents · projects
+   app.js — sidebar nav, computed frontier boards, slide-over detail,
+   decisions reader, activity rail
    ══════════════════════════════════════════════════════════════════════════ */
 
 "use strict";
@@ -20,12 +21,13 @@ const state = {
   designs: [],
   plans: [],
   sprints: [],
-  activeSprints: [],
-  selectedSprintId: null,
+  archived: null, // lazy-loaded from /api/items/archived
+  selectedProjectId: null, // sprint id or design id
+  projectMode: "map", // 'map' | 'board' — toggle inside the project view
   search: "",
-  typeFilter: new Set(),
+  kindFilter: new Set(),
   draggedCard: null,
-  view: "board",
+  view: "tickets", // tickets | project | inbox | documents | decisions | tests | archive
   ralphLoops: [],
   testsCatalogue: null,
   testsFilter: "all",
@@ -33,20 +35,236 @@ const state = {
   testsSort: "directory",
 };
 
+// Column stages in board order (overwritten from config at init)
+let COLUMNS = ["inbox", "exploring", "sdd", "planned", "done"];
+const PRIORITIES = ["critical", "balance", "feature", "polish"];
+let STAGES_FOR_ITEMS = ["inbox", "exploring", "sdd", "planned", "done"];
+
+// Valid drop targets per entity type
+const VALID_DROPS = {
+  item: ["inbox", "exploring", "sdd", "planned", "done"],
+  design: ["sdd", "planned", "done"],
+  plan: ["planned", "done"],
+};
+
+// ─────────────────────────────────────────────────────────── Kinds
+
+const KINDS = ["research", "probe", "grill", "task", "gap"];
+const KIND_COLORS = {
+  research: "#52a9ff",
+  probe: "#c084fc",
+  grill: "#f0883e",
+  task: "#46c288",
+  gap: "#e2c541",
+};
+const HITL_KINDS = new Set(["grill", "probe"]);
+
+/** Derive a ticket's kind: [research]/[probe]/[grill]/[task] title prefix, or gap type. */
+function ticketKind(item) {
+  if (!item) return null;
+  if (item.type === "gap") return "gap";
+  const m = /^\[(research|probe|grill|task)\]\s*/i.exec(item.title || "");
+  return m ? m[1].toLowerCase() : null;
+}
+
+/** Title with the [kind] prefix stripped for display. */
+function displayTitle(entity) {
+  const t = entity.title || entity.name || "(untitled)";
+  return t.replace(/^\[(research|probe|grill|task)\]\s*/i, "");
+}
+
+function kindColor(kind) {
+  return KIND_COLORS[kind] || "#9b9fad";
+}
+
+function isTicket(item) {
+  return item.type !== "decision";
+}
+
+// ─────────────────────────────────────────────────────────── Resolution / frontier
+
+function isResolvedStage(stage) {
+  return stage === "done" || stage === "closed";
+}
+
+function itemsById() {
+  const map = new Map();
+  for (const i of state.items) map.set(i.id, i);
+  return map;
+}
+
+/**
+ * Unresolved blockers for an item. Mirrors the server's frontier semantics:
+ * blockers that are done, archived, or unknown ids do not block.
+ */
+function unresolvedBlockers(item, byId) {
+  const blockers = Array.isArray(item.blockedBy) ? item.blockedBy : [];
+  return blockers.filter((id) => {
+    const blocker = byId.get(id);
+    return blocker && !isResolvedStage(blocker.stage);
+  });
+}
+
+/** Split a ticket list into { frontier, blocked, resolved }. */
+function splitByFrontier(tickets) {
+  const byId = itemsById();
+  const frontier = [];
+  const blocked = [];
+  const resolved = [];
+  for (const t of tickets) {
+    if (isResolvedStage(t.stage)) {
+      resolved.push(t);
+    } else if (unresolvedBlockers(t, byId).length > 0) {
+      blocked.push(t);
+    } else {
+      frontier.push(t);
+    }
+  }
+  const byUpdated = (a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "");
+  frontier.sort(byUpdated);
+  blocked.sort(byUpdated);
+  resolved.sort(byUpdated);
+  return { frontier, blocked, resolved };
+}
+
+// ─────────────────────────────────────────────────────────── Projects
+// A project is a promoted sprint or a map document (design with linked tickets).
+
+function computeProjects() {
+  const projects = [];
+  for (const s of state.sprints) {
+    const tickets = state.items.filter((i) => i.sprintId === s.id && isTicket(i));
+    projects.push({
+      id: s.id,
+      kind: "sprint",
+      name: s.name || s.id,
+      destination: s.problemStatement || "",
+      status: s.status,
+      tickets,
+      sprint: s,
+    });
+  }
+  for (const d of state.designs) {
+    const linked = d.linkedItems || d.itemIds || [];
+    if (linked.length === 0) continue;
+    const byId = itemsById();
+    const tickets = linked.map((id) => byId.get(id)).filter(Boolean);
+    projects.push({
+      id: d.id,
+      kind: "design",
+      name: displayTitle(d),
+      destination: extractDestination(d.body),
+      status: d.stage === "done" ? "completed" : "active",
+      tickets,
+      design: d,
+      missingCount: linked.length - tickets.length,
+    });
+  }
+  // Active first, then most recently updated
+  projects.sort((a, b) => {
+    const aa = a.status === "active" ? 0 : 1;
+    const bb = b.status === "active" ? 0 : 1;
+    if (aa !== bb) return aa - bb;
+    const au = (a.sprint || a.design || {}).updatedAt || (a.sprint || a.design || {}).createdAt || "";
+    const bu = (b.sprint || b.design || {}).updatedAt || (b.sprint || b.design || {}).createdAt || "";
+    return bu.localeCompare(au);
+  });
+  return projects;
+}
+
+function findProject(id) {
+  return computeProjects().find((p) => p.id === id) || null;
+}
+
+/** Progress = resolved/total over the project's tickets (missing linked ids count as resolved). */
+function projectProgress(p) {
+  const total = p.tickets.length + (p.missingCount || 0);
+  const resolved =
+    p.tickets.filter((t) => isResolvedStage(t.stage)).length + (p.missingCount || 0);
+  return { resolved, total };
+}
+
+/** Pull a "Destination: …" line out of a map document body. */
+function extractDestination(body) {
+  if (!body) return "";
+  const m = /Destination:\s*(.+?)(?:\n\n|\n#|$)/s.exec(body);
+  return m ? m[1].replace(/\n/g, " ").trim() : body.split("\n")[0];
+}
+
 // ─────────────────────────────────────────────────────────── Router
 
 let _skipPush = false; // prevent pushRoute during applyRoute-triggered renders
 
 function currentBoardPath() {
-  if (state.view === "decisions") return "/decisions";
-  if (state.view === "tests") return "/tests";
-  return state.selectedSprintId ? `/sprint/${state.selectedSprintId}` : "/board";
+  switch (state.view) {
+    case "decisions": return "/decisions";
+    case "tests": return "/tests";
+    case "inbox": return "/inbox";
+    case "documents": return "/documents";
+    case "archive": return "/archive";
+    case "project": return state.selectedProjectId ? `/project/${state.selectedProjectId}` : "/tickets";
+    default: return "/tickets";
+  }
 }
 
 function pushRoute(path) {
   if (_skipPush) return;
   if (window.location.pathname === path) return;
   history.pushState({}, "", path);
+}
+
+const VIEW_CONTAINERS = {
+  tickets: "kanbanBoard",
+  project: "projectView",
+  inbox: "inboxView",
+  documents: "documentsView",
+  decisions: "decisionsView",
+  tests: "testsView",
+  archive: "archiveView",
+};
+
+function showViewContainer(view) {
+  for (const [name, elId] of Object.entries(VIEW_CONTAINERS)) {
+    const el = document.getElementById(elId);
+    if (el) el.classList.toggle("hidden", name !== view);
+  }
+  const strip = document.getElementById("projectStrip");
+  if (strip) strip.classList.toggle("hidden", view !== "project");
+  document.body.dataset.view = view;
+  // Board view lives inside the project view when projectMode === 'board'
+  if (view === "project" && state.projectMode === "board") {
+    document.getElementById("kanbanBoard")?.classList.remove("hidden");
+    document.getElementById("projectView")?.classList.add("hidden");
+  }
+}
+
+function renderCurrentView() {
+  showViewContainer(state.view);
+  renderTopbar();
+  switch (state.view) {
+    case "decisions": renderDecisionsView(); break;
+    case "tests": renderTestsView(); break;
+    case "inbox": renderInboxView(); break;
+    case "documents": renderDocumentsView(); break;
+    case "archive": renderArchiveView(); break;
+    case "project":
+      if (state.projectMode === "board") renderBoard();
+      else renderProjectView();
+      renderProjectStrip();
+      break;
+    default: renderBoard(); break;
+  }
+  renderSidebar();
+  renderRail();
+}
+
+function setView(view, opts = {}) {
+  state.view = view;
+  if (view === "project") {
+    if (opts.projectId) state.selectedProjectId = opts.projectId;
+  }
+  renderCurrentView();
+  pushRoute(currentBoardPath());
 }
 
 function applyRoute() {
@@ -58,54 +276,30 @@ function applyRoute() {
   const section = parts[0] || "";
   const id = parts[1] || "";
 
-  // Determine base view + sprint
-  if (section === "decisions") {
-    state.view = "decisions";
-    state.selectedSprintId = null;
-  } else if (section === "tests") {
-    state.view = "tests";
-    state.selectedSprintId = null;
-  } else if (section === "sprint" && id) {
-    state.view = "board";
-    state.selectedSprintId = id;
-  } else if (section === "board") {
-    state.view = "board";
-    state.selectedSprintId = null;
+  if (section === "decisions") state.view = "decisions";
+  else if (section === "tests") state.view = "tests";
+  else if (section === "inbox") state.view = "inbox";
+  else if (section === "documents") state.view = "documents";
+  else if (section === "archive") state.view = "archive";
+  else if ((section === "project" || section === "sprint") && id) {
+    state.view = "project";
+    state.selectedProjectId = id;
+  } else if (section === "tickets" || section === "board") {
+    state.view = "tickets";
   } else if (["item", "sdd", "plan", "dossier"].includes(section)) {
-    // Overlay routes — keep current board state, show overlay after render
-    state.view = "board";
+    // Overlay routes — keep current base view, show overlay after render
   } else {
-    // "/" — default: auto-select most recent active sprint
-    state.view = "board";
-    if (state.activeSprints.length > 0 && !state.selectedSprintId) {
-      state.selectedSprintId = state.activeSprints[0].id;
+    // "/" — default: most recent active project, else tickets
+    const projects = computeProjects().filter((p) => p.status === "active");
+    if (projects.length > 0) {
+      state.view = "project";
+      state.selectedProjectId = state.selectedProjectId || projects[0].id;
+    } else {
+      state.view = "tickets";
     }
   }
 
-  // Render base view
-  const kanbanEl = document.getElementById("kanbanBoard");
-  const decisionsEl = document.getElementById("decisionsView");
-  const testsEl = document.getElementById("testsView");
-  if (state.view === "decisions") {
-    kanbanEl.classList.add("hidden");
-    decisionsEl.classList.remove("hidden");
-    testsEl.classList.add("hidden");
-    renderSprintTabs();
-    renderDecisionsView();
-  } else if (state.view === "tests") {
-    kanbanEl.classList.add("hidden");
-    decisionsEl.classList.add("hidden");
-    testsEl.classList.remove("hidden");
-    renderSprintTabs();
-    renderTestsView();
-  } else {
-    kanbanEl.classList.remove("hidden");
-    decisionsEl.classList.add("hidden");
-    testsEl.classList.add("hidden");
-    renderSprintTabs();
-    renderBoard();
-  }
-
+  renderCurrentView();
   _skipPush = false;
 
   // Open overlay if route specifies one
@@ -132,21 +326,8 @@ function upsertInState(entity, id, data) {
   else state[key].push(data);
 }
 
-// Column stages in board order
-const COLUMNS = ["inbox", "exploring", "sdd", "planned", "done"];
-const PRIORITIES = ["critical", "balance", "feature", "polish"];
-const STAGES_FOR_ITEMS = ["inbox", "exploring", "sdd", "planned", "done"];
+// ─────────────────────────────────────────────────────────── Pillar helpers (legacy metadata)
 
-// Valid drop targets per entity type
-const VALID_DROPS = {
-  item: ["inbox", "exploring", "sdd", "planned", "done"],
-  design: ["sdd", "planned", "done"],
-  plan: ["planned", "done"],
-};
-
-// ─────────────────────────────────────────────────────────── Pillar helpers
-
-/** Canonical pillar name normalization */
 const PILLAR_ALIASES = {
   "nudging creates meaningful tension": "Nudging creates tension",
   "satisfying growth": "Satisfying Growth",
@@ -157,7 +338,6 @@ const PILLAR_ALIASES = {
   "n/a — data quality": "Tooling",
 };
 
-/** Split a semicolon-separated pillar string into normalized individual pillars */
 function parsePillars(raw) {
   if (!raw) return [];
   return raw
@@ -167,7 +347,6 @@ function parsePillars(raw) {
     .map((s) => PILLAR_ALIASES[s.toLowerCase()] || s);
 }
 
-/** Get all unique normalized pillars across all items */
 function allUniquePillars() {
   const set = new Set();
   for (const item of state.items) {
@@ -228,17 +407,30 @@ function relativeTime(dateString) {
   return `${years}y ago`;
 }
 
+/** Short relative time for card corners: 4d, 2h, 1mo */
+function shortTime(dateString) {
+  if (!dateString) return "";
+  const diff = Date.now() - new Date(dateString).getTime();
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return `${Math.max(minutes, 1)}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo`;
+  return `${Math.floor(months / 12)}y`;
+}
+
 /**
  * Render the VERIFIED CLAIMS widget for a DD/SDD detail pane.
- * `tests` comes from the sidecar embed in /api/items/:id or /api/designs/:id
- * (may be undefined when no sidecar exists — render empty state).
  */
 function renderTestsWidget(tests) {
   const list = Array.isArray(tests) ? tests : [];
   if (list.length === 0) {
     return `
       <div class="detail-section detail-tests">
-        <h3 class="detail-section-title">VERIFIED CLAIMS</h3>
+        <h3 class="detail-section-title">Verified claims</h3>
         <div class="detail-tests-empty">(no claims yet — no tests guard this decision)</div>
       </div>
     `;
@@ -268,7 +460,7 @@ function renderTestsWidget(tests) {
     .join("");
   return `
     <div class="detail-section detail-tests">
-      <h3 class="detail-section-title">VERIFIED CLAIMS</h3>
+      <h3 class="detail-section-title">Verified claims</h3>
       ${testsHTML}
     </div>
   `;
@@ -308,7 +500,6 @@ function initImageUpload(textarea) {
   }
 
   async function handleFiles(files) {
-    // Use selected text as label, or prompt for one
     const selectedText = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd).trim();
     for (const file of files) {
       if (!file.type.startsWith("image/")) continue;
@@ -395,6 +586,10 @@ function mdToHtml(text) {
     s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, txt, url) => {
       const safeUrl = /^https?:\/\//i.test(url) ? url : "#";
       return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${txt}</a>`;
+    });
+    // Entity id cross-links (SB-123, DD-101, SDD-090, PLAN-108…) → quick-openable spans
+    s = s.replace(/\b([A-Z]{2,10}-\d{2,5})\b(?![^<]*<\/(?:code|a)>)/g, (m, id) => {
+      return `<span class="md-entity-ref" data-ref-id="${id}">${id}</span>`;
     });
     return s;
   }
@@ -505,7 +700,6 @@ function mdToHtml(text) {
         const indent = lines[i].match(/^(\s*)/)[1].length;
         const content = lines[i].replace(/^\s*[-*]\s+/, "");
         if (indent >= 2 && items.length > 0) {
-          // Nested item — append to last item
           items[items.length - 1] +=
             `<ul><li>${inlineFormat(content)}</li></ul>`;
         } else {
@@ -567,6 +761,25 @@ function mdToHtml(text) {
   return out.join("\n");
 }
 
+/** Wire clicks on SB-123-style refs inside rendered markdown. */
+function wireEntityRefs(container) {
+  if (!container) return;
+  container.querySelectorAll(".md-entity-ref[data-ref-id]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openEntityById(el.dataset.refId);
+    });
+  });
+}
+
+/** Open the right detail surface for any known entity id. */
+function openEntityById(id) {
+  if (state.items.find((i) => i.id === id)) return showDetailOverlay(id);
+  if (state.designs.find((d) => d.id === id)) return showSddDetail(id);
+  if (state.plans.find((p) => p.id === id)) return showPlanDetail(id);
+  if (state.sprints.find((s) => s.id === id)) return showSprintDossier(id);
+}
+
 // ─────────────────────────────────────────────────────────── Toast
 
 function showToast(message, type = "success") {
@@ -601,6 +814,20 @@ async function apiFetch(url, opts = {}) {
   }
 }
 
+/** Silent ralph status fetch — the route may not exist; never toast. */
+async function fetchRalphLoops() {
+  try {
+    const res = await fetch("/api/ralph", { headers: { Accept: "application/json" } });
+    if (!res.ok) return [];
+    const type = res.headers.get("content-type") || "";
+    if (!type.includes("application/json")) return [];
+    const loops = await res.json();
+    return Array.isArray(loops) ? loops : [];
+  } catch {
+    return [];
+  }
+}
+
 async function loadAll() {
   const [items, designs, plans, sprints] = await Promise.all([
     apiFetch("/api/items").catch(() => []),
@@ -612,224 +839,287 @@ async function loadAll() {
   state.designs = designs || [];
   state.plans = plans || [];
   state.sprints = sprints || [];
-
-  // Determine active sprints
-  state.activeSprints = state.sprints.filter((s) => s.status === "active").reverse();
-  // Auto-select most recent active sprint if nothing selected
-  if (state.selectedSprintId === null && state.activeSprints.length > 0) {
-    state.selectedSprintId = state.activeSprints[0].id;
-  }
-  // If selected sprint was ended/deleted, fall back
-  if (
-    state.selectedSprintId &&
-    !state.activeSprints.find((s) => s.id === state.selectedSprintId)
-  ) {
-    state.selectedSprintId = state.activeSprints[0]?.id ?? null;
-  }
-  renderSprintTabs();
 }
 
-// ─────────────────────────────────────────────────────────── Sprint info
+// ─────────────────────────────────────────────────────────── Sidebar
 
-function renderSprintTabs() {
-  const container = document.getElementById("sprintInfo");
-  const sprintBtn = document.getElementById("sprintBtn");
-  if (!container) return;
+function navCounts() {
+  const openTickets = state.items.filter((i) => isTicket(i) && !isResolvedStage(i.stage));
+  return {
+    inbox: openTickets.filter((i) => i.stage === "inbox").length,
+    tickets: openTickets.length,
+    documents:
+      state.designs.filter((d) => d.stage !== "done").length +
+      state.plans.filter((p) => p.stage !== "done").length,
+    decisions: state.items.filter((i) => i.type === "decision").length,
+  };
+}
 
-  const tabs = [
-    { id: null, label: "All Items", isAll: true },
-    ...state.activeSprints.map((s) => ({
-      id: s.id,
-      label: s.name,
-      isAll: false,
-    })),
+function renderSidebar() {
+  const nav = document.getElementById("sidebarNav");
+  if (!nav) return;
+  const counts = navCounts();
+
+  const navRows = [
+    { view: "inbox", label: "Inbox", count: counts.inbox, swatch: "swatch-dashed" },
+    { view: "tickets", label: "Tickets", count: counts.tickets, swatch: "swatch-neutral" },
+    { view: "documents", label: "Documents", count: counts.documents, swatch: "swatch-indigo" },
+    { view: "decisions", label: "Decisions", count: counts.decisions, swatch: "swatch-blue" },
+    { view: "tests", label: "Tests", count: null, swatch: "swatch-neutral" },
+    { view: "archive", label: "Archive", count: null, swatch: "swatch-neutral" },
   ];
 
-  container.innerHTML = tabs
+  nav.innerHTML = navRows
     .map(
-      (tab) => `
-    <button
-      class="sprint-tab${tab.isAll ? " tab-all" : ""}${state.view === "board" && state.selectedSprintId === tab.id ? " tab-active" : ""}"
-      data-sprint-id="${tab.id === null ? "" : escAttr(tab.id)}"
-    >
-      <span class="sprint-tab-dot"></span>
-      ${escText(tab.label)}
-    </button>
-  `,
+      (r) => `
+    <button class="nav-row${state.view === r.view ? " nav-active" : ""}" data-view="${r.view}">
+      <span class="nav-swatch ${r.swatch}"></span>
+      <span class="nav-label">${r.label}</span>
+      ${r.count !== null ? `<span class="nav-count">${r.count}</span>` : ""}
+    </button>`,
     )
-    .join("") +
-    `<button class="sprint-tab tab-decisions${state.view === "decisions" ? " tab-active" : ""}">
-      <span class="sprint-tab-dot" style="background:var(--accent)"></span>
-      Decisions
-    </button>` +
-    `<button class="sprint-tab tab-tests${state.view === "tests" ? " tab-active" : ""}">
-      <span class="sprint-tab-dot" style="background:var(--accent)"></span>
-      Tests
-    </button>`;
+    .join("");
 
-  // Wire sprint/all-items tab clicks
-  container.querySelectorAll(".sprint-tab:not(.tab-decisions):not(.tab-tests)").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const rawId = btn.dataset.sprintId;
-      state.selectedSprintId = rawId === "" ? null : rawId;
-      state.view = "board";
-      document.getElementById("kanbanBoard").classList.remove("hidden");
-      document.getElementById("decisionsView").classList.add("hidden");
-      document.getElementById("testsView").classList.add("hidden");
-      renderSprintTabs();
-      renderBoard();
-      pushRoute(rawId ? `/sprint/${rawId}` : "/board");
+  nav.querySelectorAll(".nav-row").forEach((btn) => {
+    btn.addEventListener("click", () => setView(btn.dataset.view));
+  });
+
+  // Projects — only ones with open work (or the selected one), capped
+  const projEl = document.getElementById("sidebarProjects");
+  if (projEl) {
+    const all = computeProjects();
+    let projects = all.filter((p) => {
+      if (p.id === state.selectedProjectId) return true;
+      if (p.status !== "active") return false;
+      const { resolved, total } = projectProgress(p);
+      return total === 0 || resolved < total;
     });
-  });
-
-  // Wire Decisions tab click
-  container.querySelector(".tab-decisions").addEventListener("click", () => {
-    state.view = "decisions";
-    document.getElementById("kanbanBoard").classList.add("hidden");
-    document.getElementById("decisionsView").classList.remove("hidden");
-    document.getElementById("testsView").classList.add("hidden");
-    renderSprintTabs();
-    renderDecisionsView();
-    pushRoute("/decisions");
-  });
-
-  // Wire Tests tab click
-  container.querySelector(".tab-tests").addEventListener("click", () => {
-    state.view = "tests";
-    document.getElementById("kanbanBoard").classList.add("hidden");
-    document.getElementById("decisionsView").classList.add("hidden");
-    document.getElementById("testsView").classList.remove("hidden");
-    renderSprintTabs();
-    renderTestsView();
-    pushRoute("/tests");
-  });
-
-  // Keep sprintBtn in sync — "End Sprint" only when a specific sprint tab is selected
-  if (sprintBtn) {
-    sprintBtn.textContent = state.selectedSprintId ? "End Sprint" : "+ Sprint";
-  }
-
-  // Show/hide Explore button based on sprint selection
-  const exploreBtn = document.getElementById("exploreSprintBtn");
-  if (exploreBtn) {
-    if (state.selectedSprintId) {
-      exploreBtn.classList.remove("hidden");
-    } else {
-      exploreBtn.classList.add("hidden");
-    }
-  }
-
-  if (!state.selectedSprintId) removeSuggestionsBar();
-}
-
-// ─────────────────────────────────────────────────────────── Sprint suggestions bar
-
-function removeSuggestionsBar() {
-  const existing = document.getElementById("suggestionsBar");
-  if (existing) existing.remove();
-}
-
-async function showSprintSuggestions(sprintId) {
-  try {
-    const suggestions = await apiFetch(`/api/sprints/${sprintId}/suggest`);
-    if (!suggestions || !suggestions.length) return;
-
-    removeSuggestionsBar();
-
-    const bar = document.createElement("div");
-    bar.id = "suggestionsBar";
-    bar.className = "suggestions-bar";
-    bar.innerHTML = `
-      <span class="suggestions-label">Suggested items:</span>
-      <div class="suggestions-chips">
-        ${suggestions
-          .map(
-            (s) => `
-          <button class="suggestion-chip" data-item-id="${escAttr(s.id || s.itemId || "")}">
-            <span class="chip-id">${escText(s.id || s.itemId || "")}</span>
-            <span class="chip-title">${escText(s.title || "")}</span>
-          </button>
-        `,
-          )
-          .join("")}
-      </div>
-    `;
-
-    // Insert after header
-    const header = document.querySelector(".dashboard-header");
-    if (header && header.nextSibling) {
-      header.parentNode.insertBefore(bar, header.nextSibling);
-    } else {
-      document.body.prepend(bar);
-    }
-
-    // Wire chip clicks
-    bar.querySelectorAll(".suggestion-chip").forEach((chip) => {
-      chip.addEventListener("click", async () => {
-        const itemId = chip.dataset.itemId;
-        if (!itemId) return;
-        try {
-          await apiFetch(`/api/sprints/${sprintId}/items`, {
-            method: "POST",
-            body: JSON.stringify({ itemId }),
-          });
-          chip.remove();
-          // Remove bar if no chips left
-          const remaining = bar.querySelectorAll(".suggestion-chip");
-          if (remaining.length === 0) bar.remove();
-          showToast(`Added ${itemId} to sprint`);
-        } catch (err) {
-          /* toasted */
-        }
+    const overflow = projects.length - 12;
+    if (overflow > 0) projects = projects.slice(0, 12);
+    projEl.innerHTML = projects
+      .map((p) => {
+        const { resolved, total } = projectProgress(p);
+        const active = state.view === "project" && state.selectedProjectId === p.id;
+        const done = p.status !== "active";
+        const dotStyle = done
+          ? "background:#3b3e4d"
+          : active
+            ? "background:#7b83eb;box-shadow:0 0 6px rgba(123,131,235,.6)"
+            : "background:#46c288";
+        const meta = done
+          ? '<span class="proj-check">✓</span>'
+          : `<span class="proj-progress">${resolved}/${total}</span>`;
+        return `
+        <button class="proj-row${active ? " proj-active" : ""}${done ? " proj-done" : ""}" data-project-id="${escAttr(p.id)}">
+          <span class="proj-dot" style="${dotStyle}"></span>
+          <span class="proj-name">${escText(p.name)}</span>
+          ${meta}
+        </button>`;
+      })
+      .join("") + (overflow > 0 ? `<div class="proj-overflow">+ ${overflow} more — ⌘K to jump</div>` : "");
+    projEl.querySelectorAll(".proj-row").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.projectMode = "map";
+        setView("project", { projectId: btn.dataset.projectId });
       });
     });
-  } catch (err) {
-    // Suggestions are optional, don't block on failure
+  }
+
+  // Kinds (open tickets only) — click toggles filter
+  const kindsEl = document.getElementById("sidebarKinds");
+  if (kindsEl) {
+    const open = state.items.filter((i) => isTicket(i) && !isResolvedStage(i.stage));
+    kindsEl.innerHTML = KINDS.map((k) => {
+      const count = open.filter((i) => ticketKind(i) === k).length;
+      const active = state.kindFilter.has(k);
+      return `
+        <button class="kind-row${active ? " kind-active" : ""}" data-kind="${k}">
+          <span class="kind-dot" style="background:${kindColor(k)}"></span>
+          <span class="kind-label">${k}</span>
+          <span class="kind-count">${count}</span>
+        </button>`;
+    }).join("");
+    kindsEl.querySelectorAll(".kind-row").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const k = btn.dataset.kind;
+        if (state.kindFilter.has(k)) state.kindFilter.delete(k);
+        else state.kindFilter.add(k);
+        renderCurrentView();
+      });
+    });
   }
 }
 
+// ─────────────────────────────────────────────────────────── Topbar
+
+const VIEW_TITLES = {
+  tickets: "Tickets",
+  inbox: "Inbox",
+  documents: "Documents",
+  decisions: "Decisions",
+  tests: "Tests",
+  archive: "Archive",
+};
+
+function renderTopbar() {
+  const bar = document.getElementById("topbar");
+  if (!bar) return;
+
+  let leftHTML = "";
+  let togglesHTML = "";
+  let extraActions = "";
+
+  if (state.view === "project") {
+    const p = findProject(state.selectedProjectId);
+    if (!p) {
+      leftHTML = `<span class="topbar-title">Project</span>`;
+    } else {
+      const sddLink =
+        p.kind === "design"
+          ? `<button class="topbar-doclink" id="topbarSddLink">${escText(p.id)} ↗</button>`
+          : `<span class="topbar-sub">${escText(p.id)}</span>`;
+      leftHTML = `<span class="topbar-title">${escText(p.name)}</span>${sddLink}`;
+      togglesHTML = `
+        <div class="seg-toggle">
+          <button class="seg${state.projectMode === "map" ? " seg-active" : ""}" data-mode="map">Map</button>
+          <button class="seg${state.projectMode === "board" ? " seg-active" : ""}" data-mode="board">Board</button>
+        </div>`;
+      if (p.kind === "sprint" && p.status === "active") {
+        extraActions = `
+          <button class="btn btn-ghost btn-sm" id="exploreSprintBtn">Explore</button>
+          <button class="btn btn-ghost btn-sm" id="endSprintBtn">End</button>`;
+      }
+    }
+  } else {
+    const counts = navCounts();
+    const sub =
+      state.view === "tickets" ? `<span class="topbar-sub">${counts.tickets} open</span>` :
+      state.view === "inbox" ? `<span class="topbar-sub">${counts.inbox} waiting</span>` :
+      state.view === "decisions" ? `<span class="topbar-sub">${counts.decisions} · newest carry the weight</span>` :
+      "";
+    leftHTML = `<span class="topbar-title">${VIEW_TITLES[state.view] || ""}</span>${sub}`;
+  }
+
+  bar.innerHTML = `
+    ${leftHTML}
+    <div class="topbar-actions">
+      ${togglesHTML}
+      <input type="search" class="topbar-search" id="searchBox" placeholder="Filter…" value="${escAttr(state.search)}">
+      ${extraActions}
+      <button class="btn btn-primary btn-sm" id="newItemBtn">New ticket</button>
+    </div>
+  `;
+
+  // Wire
+  const searchBox = document.getElementById("searchBox");
+  if (searchBox) {
+    const doSearch = debounce((val) => {
+      state.search = val.trim();
+      renderActiveContent();
+    }, 200);
+    searchBox.addEventListener("input", (e) => doSearch(e.target.value));
+  }
+  document.getElementById("newItemBtn")?.addEventListener("click", () => openNewItemModal("inbox"));
+  bar.querySelectorAll(".seg-toggle .seg").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.projectMode = btn.dataset.mode;
+      renderCurrentView();
+    });
+  });
+  document.getElementById("topbarSddLink")?.addEventListener("click", () => {
+    showSddDetail(state.selectedProjectId);
+  });
+  document.getElementById("exploreSprintBtn")?.addEventListener("click", () => {
+    if (state.selectedProjectId) showSprintDossier(state.selectedProjectId);
+  });
+  document.getElementById("endSprintBtn")?.addEventListener("click", endActiveSprint);
+}
+
+/** Re-render just the content pane (search etc.), keeping topbar focus intact. */
+function renderActiveContent() {
+  switch (state.view) {
+    case "decisions": renderDecisionsView(); break;
+    case "tests": applyTestsFilters(); break;
+    case "inbox": renderInboxView(); break;
+    case "documents": renderDocumentsView(); break;
+    case "archive": renderArchiveView(); break;
+    case "project":
+      if (state.projectMode === "board") renderBoard();
+      else renderProjectView();
+      break;
+    default: renderBoard(); break;
+  }
+}
+
+// ─────────────────────────────────────────────────────────── Sprint end
+
 async function endActiveSprint() {
-  if (!state.selectedSprintId) return;
-  const endingId = state.selectedSprintId;
+  const p = findProject(state.selectedProjectId);
+  if (!p || p.kind !== "sprint") return;
   try {
-    await apiFetch(`/api/sprints/${endingId}`, {
+    await apiFetch(`/api/sprints/${p.id}`, {
       method: "PATCH",
       body: JSON.stringify({ status: "completed" }),
     });
-    removeSuggestionsBar();
-    showToast("Sprint ended");
+    showToast("Project completed");
   } catch (err) {
     /* toasted */
   }
 }
 
-// ─────────────────────────────────────────────────────────── Card builder
+// ─────────────────────────────────────────────────────────── Shared filters
+
+function matchesSearch(entity) {
+  if (!state.search) return true;
+  const q = state.search.toLowerCase();
+  const title = (entity.title || entity.name || "").toLowerCase();
+  const id = (entity.id || "").toLowerCase();
+  return title.includes(q) || id.includes(q);
+}
+
+function matchesKindFilter(item) {
+  if (state.kindFilter.size === 0) return true;
+  return state.kindFilter.has(ticketKind(item));
+}
+
+// ─────────────────────────────────────────────────────────── Card builder (kanban board)
 
 function buildCardHTML(entity, type) {
   const id = entity.id || "";
-  const title = entity.title || entity.name || "(untitled)";
+  const title = displayTitle(entity);
+  const kind = type === "item" ? ticketKind(entity) : null;
+  const idColor = kind ? kindColor(kind) : type === "design" ? "#7b83eb" : type === "plan" ? "#46c288" : "#62667a";
+
+  // Kind / type label
+  let kindLabel = "";
+  if (kind) {
+    kindLabel = `<span class="card-kind" style="color:${kindColor(kind)}">${kind.toUpperCase()}</span>`;
+  } else if (type === "design") {
+    kindLabel = '<span class="card-kind" style="color:#7b83eb">MAP</span>';
+  } else if (type === "plan") {
+    kindLabel = '<span class="card-kind" style="color:#46c288">PLAN</span>';
+  }
 
   // Priority pill (items only)
   let priorityPill = "";
   if (type === "item" && entity.priority) {
-    priorityPill = `<span class="badge badge-priority-${escAttr(entity.priority)}">${escText(entity.priority)}</span>`;
+    priorityPill = `<span class="card-priority card-priority-${escAttr(entity.priority)}">${escText(entity.priority).toUpperCase()}</span>`;
   }
 
-  // Type badge
-  let typeBadge = "";
-  if (type === "item" && entity.type) {
-    typeBadge = `<span class="badge badge-type-${escAttr(entity.type)}">${escText(entity.type)}</span>`;
-  } else if (type === "design") {
-    typeBadge = '<span class="badge badge-type">SDD</span>';
-  } else if (type === "plan") {
-    typeBadge = '<span class="badge badge-type">Plan</span>';
+  // Blocked-by chips
+  let blockedChips = "";
+  if (type === "item") {
+    const blockers = unresolvedBlockers(entity, itemsById());
+    if (blockers.length > 0) {
+      blockedChips = `<span class="card-blocked">⊘ ${blockers.map(escText).join(" · ")}</span>`;
+    }
   }
 
   // Comment count
   const commentCount = (entity.comments || []).length;
   const commentBadge =
     commentCount > 0
-      ? `<span class="card-comments">${commentCount} comment${commentCount !== 1 ? "s" : ""}</span>`
+      ? `<span class="card-note">${commentCount} comment${commentCount !== 1 ? "s" : ""}</span>`
       : "";
 
   // Task progress (plans)
@@ -837,32 +1127,22 @@ function buildCardHTML(entity, type) {
   if (type === "plan" && entity.tasks && entity.tasks.length > 0) {
     const done = entity.tasks.filter((t) => t.status === "done").length;
     const total = entity.tasks.length;
-    taskProgress = `<span class="card-progress"><span class="done">${done}</span>/${total} tasks</span>`;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    taskProgress = `
+      <span class="card-taskbar"><span style="width:${pct}%"></span></span>
+      <span class="card-progress">${done}/${total}</span>`;
   }
 
   // Linked item count (SDDs)
   let linkedCount = "";
-  if (
-    type === "design" &&
-    entity.linkedItems &&
-    entity.linkedItems.length > 0
-  ) {
-    linkedCount = `<span class="card-comments">${entity.linkedItems.length} linked</span>`;
+  if (type === "design" && entity.linkedItems && entity.linkedItems.length > 0) {
+    linkedCount = `<span class="card-note">${entity.linkedItems.length} linked</span>`;
   }
 
-  // Pillar badges (items only)
-  const pillarBadges =
-    type === "item"
-      ? parsePillars(entity.pillar)
-          .map((p) => `<span class="badge badge-pillar">${escText(p)}</span>`)
-          .join("")
-      : "";
-
-  // Card class modifiers
   let cardClass = "card";
   if (type === "design") cardClass += " card-sdd";
   if (type === "plan") cardClass += " card-plan";
-  if (type === "item" && entity.type) cardClass += ` card-type-${entity.type}`;
+  if (kind) cardClass += ` card-kind-${kind}`;
 
   return `
     <div class="${cardClass}"
@@ -870,18 +1150,791 @@ function buildCardHTML(entity, type) {
          data-entity-type="${escAttr(type)}"
          data-entity-id="${escAttr(id)}"
          tabindex="0">
-      <div class="card-id">${escText(id)}${entity.updatedAt ? `<span class="card-updated" title="${escAttr(new Date(entity.updatedAt).toLocaleString())}">updated ${relativeTime(entity.updatedAt)}</span>` : ""}</div>
+      <div class="card-top">
+        <span class="card-id" style="color:${idColor}">${escText(id)}</span>
+        ${kindLabel}
+        ${priorityPill}
+        <span class="card-age">${shortTime(entity.updatedAt || entity.createdAt)}</span>
+      </div>
       <div class="card-title">${escText(title)}</div>
       <div class="card-meta">
-        ${typeBadge}
-        ${priorityPill}
-        ${pillarBadges}
+        ${blockedChips}
         ${commentBadge}
-        ${taskProgress}
         ${linkedCount}
+        ${taskProgress}
       </div>
     </div>
   `;
+}
+
+// ─────────────────────────────────────────────────────────── Board (stage kanban)
+
+function boardScopeTickets() {
+  // In project-board mode, restrict to the project's entities
+  if (state.view === "project") {
+    const p = findProject(state.selectedProjectId);
+    if (p) {
+      const ids = new Set(p.tickets.map((t) => t.id));
+      return { project: p, ids };
+    }
+  }
+  return { project: null, ids: null };
+}
+
+function renderBoard() {
+  const scope = boardScopeTickets();
+
+  COLUMNS.forEach((stage) => {
+    const cardsContainer = document.getElementById(`cards-${stage}`);
+    const countEl = document.getElementById(`count-${stage}`);
+    if (!cardsContainer) return;
+
+    const cards = [];
+
+    if (stage === "done") {
+      state.items.forEach((item) => {
+        if (item.stage === "done" || item.stage === "closed")
+          cards.push({ entity: item, type: "item" });
+      });
+      state.designs.forEach((d) => {
+        if (d.stage === "done") cards.push({ entity: d, type: "design" });
+      });
+      state.plans.forEach((p) => {
+        if (p.stage === "done") cards.push({ entity: p, type: "plan" });
+      });
+    } else if (stage === "sdd") {
+      state.items.forEach((item) => {
+        if (item.stage === "sdd") cards.push({ entity: item, type: "item" });
+      });
+      state.designs.forEach((d) => {
+        if (d.stage !== "done") cards.push({ entity: d, type: "design" });
+      });
+    } else if (stage === "planned") {
+      state.items.forEach((item) => {
+        if (item.stage === "planned")
+          cards.push({ entity: item, type: "item" });
+      });
+      state.plans.forEach((p) => {
+        if (p.stage !== "done") cards.push({ entity: p, type: "plan" });
+      });
+    } else {
+      state.items.forEach((item) => {
+        if (item.stage === stage) cards.push({ entity: item, type: "item" });
+      });
+    }
+
+    // Decisions live in the Decisions view
+    let filtered = cards.filter((c) => c.type !== "item" || c.entity.type !== "decision");
+
+    // Project scope: project entities + unassigned inbox tickets (draggable into the project)
+    if (scope.project) {
+      filtered = filtered.filter((c) => {
+        const e = c.entity;
+        if (scope.ids.has(e.id)) return true;
+        if (scope.project.kind === "sprint" && e.sprintId === scope.project.id) return true;
+        if (stage === "inbox" && !e.sprintId) return true;
+        return false;
+      });
+    }
+
+    filtered = filtered.filter((c) => matchesSearch(c.entity));
+    filtered = filtered.filter((c) => c.type !== "item" || matchesKindFilter(c.entity));
+
+    filtered.sort((a, b) => {
+      const ta = a.entity.createdAt || "";
+      const tb = b.entity.createdAt || "";
+      return tb.localeCompare(ta);
+    });
+
+    if (countEl) countEl.textContent = filtered.length;
+
+    cardsContainer.innerHTML = filtered
+      .map((c) => buildCardHTML(c.entity, c.type))
+      .join("");
+
+    cardsContainer.querySelectorAll(".card").forEach((cardEl, i) => {
+      cardEl.style.setProperty("--i", i);
+    });
+  });
+
+  annotateRalphCards();
+}
+
+// Delegated card click handler — wired once in initDragAndDrop on the board
+function handleCardClick(e) {
+  const card = e.target.closest(".card");
+  if (!card || state.draggedCard) return;
+  const entityType = card.dataset.entityType;
+  const entityId = card.dataset.entityId;
+  if (entityType === "item") showDetailOverlay(entityId);
+  else if (entityType === "design") showSddDetail(entityId);
+  else if (entityType === "plan") showPlanDetail(entityId);
+}
+
+/** Determine which column stage an entity belongs in */
+function stageForEntity(entity, type) {
+  const stage = entity.stage;
+  if (stage === "done" || stage === "closed") return "done";
+  if (type === "design") return stage || "sdd";
+  if (type === "plan") return stage || "planned";
+  return stage || "inbox";
+}
+
+// ─────────────────────────────────────────────────────────── Drag and Drop
+
+function initDragAndDrop() {
+  const board = document.getElementById("kanbanBoard");
+  if (!board) return;
+
+  board.addEventListener("click", handleCardClick);
+
+  board.addEventListener("dragstart", (e) => {
+    const card = e.target.closest(".card");
+    if (!card) return;
+    const entityType = card.dataset.entityType;
+    const entityId = card.dataset.entityId;
+    state.draggedCard = { type: entityType, id: entityId };
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", JSON.stringify(state.draggedCard));
+    card.classList.add("dragging");
+  });
+
+  board.addEventListener("dragend", (e) => {
+    const card = e.target.closest(".card");
+    if (card) card.classList.remove("dragging");
+    state.draggedCard = null;
+    board
+      .querySelectorAll(".kanban-col.drag-over")
+      .forEach((col) => col.classList.remove("drag-over"));
+  });
+
+  board.querySelectorAll(".kanban-col").forEach((col) => {
+    col.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      col.classList.add("drag-over");
+    });
+
+    col.addEventListener("dragleave", (e) => {
+      if (!col.contains(e.relatedTarget)) {
+        col.classList.remove("drag-over");
+      }
+    });
+
+    col.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      col.classList.remove("drag-over");
+
+      let data = state.draggedCard;
+      if (!data) {
+        try {
+          data = JSON.parse(e.dataTransfer.getData("text/plain"));
+        } catch {
+          return;
+        }
+      }
+      if (!data || !data.type || !data.id) return;
+
+      const targetStage = col.dataset.stage;
+      const validStages = VALID_DROPS[data.type];
+      if (!validStages || !validStages.includes(targetStage)) {
+        showToast(`Cannot move ${data.type} to ${targetStage}`, "error");
+        return;
+      }
+
+      let endpoint;
+      if (data.type === "item") endpoint = `/api/items/${data.id}`;
+      else if (data.type === "design") endpoint = `/api/designs/${data.id}`;
+      else if (data.type === "plan") endpoint = `/api/plans/${data.id}`;
+
+      try {
+        const patchData = { stage: targetStage };
+        // Dragging within a sprint-project board assigns unassigned entities to it
+        const scope = boardScopeTickets();
+        if (scope.project && scope.project.kind === "sprint") {
+          let entity = null;
+          if (data.type === "item") entity = state.items.find((i) => i.id === data.id);
+          else if (data.type === "design") entity = state.designs.find((d) => d.id === data.id);
+          else if (data.type === "plan") entity = state.plans.find((p) => p.id === data.id);
+          if (entity && !entity.sprintId) {
+            patchData.sprintId = scope.project.id;
+          }
+        }
+
+        await apiFetch(endpoint, {
+          method: "PATCH",
+          body: JSON.stringify(patchData),
+        });
+        showToast(`Moved to ${targetStage}`);
+      } catch (err) {
+        /* toasted */
+      }
+
+      state.draggedCard = null;
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────── Project view (Frontier / Blocked / Resolved)
+
+function projectTicketCardHTML(t, column) {
+  const kind = ticketKind(t);
+  const color = kindColor(kind);
+  const byId = itemsById();
+  const kindLabel = kind
+    ? `<span class="pcard-kind" style="color:${color}">${kind.toUpperCase()}</span>`
+    : "";
+
+  if (column === "frontier") {
+    const hitl = HITL_KINDS.has(kind);
+    const hint = hitl
+      ? `<span class="pcard-hint" style="color:${color}">needs a session</span>`
+      : `<span class="pcard-hint">${escText(t.stage)}</span>`;
+    return `
+      <div class="pcard pcard-frontier" data-id="${escAttr(t.id)}" style="border-color:${color}55">
+        <div class="pcard-top">
+          <span class="pcard-id" style="color:${color}">${escText(t.id)}</span>
+          ${kindLabel}
+          <span class="pcard-age">${shortTime(t.updatedAt || t.createdAt)}</span>
+        </div>
+        <div class="pcard-title">${escText(displayTitle(t))}</div>
+        <div class="pcard-foot">
+          ${hint}
+          <button class="pcard-open" data-id="${escAttr(t.id)}">Open</button>
+        </div>
+      </div>`;
+  }
+
+  if (column === "blocked") {
+    const blockers = unresolvedBlockers(t, byId);
+    const chips = blockers
+      .map((id) => {
+        const b = byId.get(id);
+        const c = kindColor(ticketKind(b));
+        return `<span class="pcard-waitchip" style="color:${c};background:${c}14">${escText(id)}</span>`;
+      })
+      .join("");
+    return `
+      <div class="pcard pcard-blocked" data-id="${escAttr(t.id)}">
+        <div class="pcard-top">
+          <span class="pcard-id" style="color:${color}">${escText(t.id)}</span>
+          ${kindLabel}
+        </div>
+        <div class="pcard-title">${escText(displayTitle(t))}</div>
+        <div class="pcard-foot"><span class="pcard-hint">waits on</span>${chips}</div>
+      </div>`;
+  }
+
+  // resolved
+  const lastComment = (t.comments || [])[t.comments?.length - 1];
+  const outcome = lastComment
+    ? `<div class="pcard-outcome">→ ${escText(lastComment.text.split("\n")[0].slice(0, 110))}</div>`
+    : "";
+  return `
+    <div class="pcard pcard-resolved" data-id="${escAttr(t.id)}">
+      <div class="pcard-top">
+        <span class="pcard-id" style="color:${color}">${escText(t.id)}</span>
+        <span class="pcard-check">✓</span>
+      </div>
+      <div class="pcard-title">${escText(displayTitle(t))}</div>
+      ${outcome}
+    </div>`;
+}
+
+function renderProjectView() {
+  const container = document.getElementById("projectView");
+  if (!container) return;
+  const p = findProject(state.selectedProjectId);
+  if (!p) {
+    container.innerHTML = '<div class="view-empty">Project not found — it may have been archived.</div>';
+    return;
+  }
+
+  let tickets = p.tickets.filter(matchesSearch).filter(matchesKindFilter);
+  const { frontier, blocked, resolved } = splitByFrontier(tickets);
+
+  // Pacing hint when several frontier tickets need human judgment
+  const hitl = frontier.filter((t) => HITL_KINDS.has(ticketKind(t)));
+  const pacingHTML =
+    hitl.length >= 2
+      ? `<div class="pacing-hint">Pacing: <strong>one judgment ticket per session</strong> — ${hitl
+          .map((t) => escText(t.id))
+          .join(" and ")} all need you; don't batch them.</div>`
+      : "";
+
+  const resolvedShown = resolved.slice(0, 8);
+  const resolvedMore = resolved.length - resolvedShown.length;
+
+  container.innerHTML = `
+    <div class="pcol">
+      <div class="pcol-header">
+        <span class="pcol-dot pcol-dot-frontier"></span>
+        <span class="pcol-title">Frontier</span>
+        <span class="pcol-count">${frontier.length}</span>
+        <span class="pcol-hint">unblocked · unclaimed</span>
+      </div>
+      <div class="pcol-cards">
+        ${frontier.map((t) => projectTicketCardHTML(t, "frontier")).join("") || '<div class="pcol-empty">Nothing on the frontier — resolve a blocker or pull a ticket in.</div>'}
+        ${pacingHTML}
+      </div>
+    </div>
+    <div class="pcol">
+      <div class="pcol-header">
+        <span class="pcol-dot pcol-dot-blocked"></span>
+        <span class="pcol-title pcol-title-dim">Blocked</span>
+        <span class="pcol-count">${blocked.length}</span>
+        <span class="pcol-hint">behind the fog</span>
+      </div>
+      <div class="pcol-cards">
+        ${blocked.map((t) => projectTicketCardHTML(t, "blocked")).join("") || '<div class="pcol-empty">No blocked tickets.</div>'}
+      </div>
+    </div>
+    <div class="pcol pcol-narrow">
+      <div class="pcol-header">
+        <span class="pcol-dot pcol-dot-resolved"></span>
+        <span class="pcol-title pcol-title-dim">Resolved</span>
+        <span class="pcol-count">${resolved.length}</span>
+      </div>
+      <div class="pcol-cards pcol-cards-resolved">
+        ${resolvedShown.map((t) => projectTicketCardHTML(t, "resolved")).join("") || '<div class="pcol-empty">Nothing resolved yet.</div>'}
+        ${resolvedMore > 0 ? `<div class="pcol-more">+ ${resolvedMore} more</div>` : ""}
+      </div>
+    </div>
+  `;
+
+  container.querySelectorAll(".pcard[data-id]").forEach((el) => {
+    el.addEventListener("click", () => showDetailOverlay(el.dataset.id));
+  });
+}
+
+function renderProjectStrip() {
+  const strip = document.getElementById("projectStrip");
+  if (!strip) return;
+  const p = findProject(state.selectedProjectId);
+  if (!p) {
+    strip.classList.add("hidden");
+    return;
+  }
+  strip.classList.remove("hidden");
+  const { resolved, total } = projectProgress(p);
+  const pct = total > 0 ? Math.round((resolved / total) * 100) : 0;
+  strip.innerHTML = `
+    <div class="strip-text"><strong>Destination:</strong> ${escText(p.destination || "(no destination set — edit the project)")}</div>
+    <div class="strip-progress">
+      <div class="strip-bar"><div style="width:${pct}%"></div></div>
+      <span class="strip-nums">${resolved}/${total} resolved</span>
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────── Inbox view
+
+function renderInboxView() {
+  const container = document.getElementById("inboxView");
+  if (!container) return;
+  const items = state.items
+    .filter((i) => isTicket(i) && i.stage === "inbox")
+    .filter(matchesSearch)
+    .filter(matchesKindFilter)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+  if (items.length === 0) {
+    container.innerHTML = '<div class="view-empty">Inbox zero.</div>';
+    return;
+  }
+
+  const byId = itemsById();
+  container.innerHTML = `
+    <div class="list-pane">
+      ${items
+        .map((t) => {
+          const kind = ticketKind(t);
+          const color = kindColor(kind);
+          const blockers = unresolvedBlockers(t, byId);
+          const lastComment = (t.comments || [])[t.comments?.length - 1];
+          const metaBits = [];
+          if (kind) metaBits.push(`<span style="color:${color};font-weight:600">${kind}</span>`);
+          if (t.priority) metaBits.push(`<span class="lrow-priority">${escText(t.priority).toUpperCase()}</span>`);
+          if (blockers.length) metaBits.push(`<span class="lrow-blocked">⊘ ${blockers.map(escText).join(" · ")}</span>`);
+          if (lastComment) metaBits.push(`<span class="lrow-comment">${escText(lastComment.author || "")} commented</span>`);
+          return `
+          <div class="lrow" data-id="${escAttr(t.id)}">
+            <span class="lrow-id" style="color:${kind ? color : "#62667a"}">${escText(t.id)}</span>
+            <span class="lrow-title">${escText(displayTitle(t))}</span>
+            <span class="lrow-meta">${metaBits.join('<span class="lrow-sep">·</span>')}</span>
+            <span class="lrow-age">${shortTime(t.createdAt)}</span>
+          </div>`;
+        })
+        .join("")}
+    </div>
+  `;
+  container.querySelectorAll(".lrow[data-id]").forEach((el) => {
+    el.addEventListener("click", () => showDetailOverlay(el.dataset.id));
+  });
+}
+
+// ─────────────────────────────────────────────────────────── Documents view
+
+function renderDocumentsView() {
+  const container = document.getElementById("documentsView");
+  if (!container) return;
+
+  const designs = state.designs.filter(matchesSearch);
+  const plans = state.plans.filter(matchesSearch);
+
+  const designRows = designs
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
+    .map((d) => {
+      const linked = d.linkedItems || d.itemIds || [];
+      const done = d.stage === "done";
+      return `
+      <div class="lrow${done ? " lrow-done" : ""}" data-id="${escAttr(d.id)}" data-kind="design">
+        <span class="lrow-id" style="color:#7b83eb">${escText(d.id)}</span>
+        <span class="lrow-title">${escText(displayTitle(d))}</span>
+        <span class="lrow-meta">${linked.length ? `${linked.length} linked` : ""}${done ? '<span class="lrow-sep">·</span>done' : ""}</span>
+        <span class="lrow-age">${shortTime(d.updatedAt)}</span>
+      </div>`;
+    })
+    .join("");
+
+  const planRows = plans
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
+    .map((p) => {
+      const tasks = p.tasks || [];
+      const done = tasks.filter((t) => t.status === "done").length;
+      const ralphLive = state.ralphLoops.some((l) => l.alive && l.planId === p.id);
+      return `
+      <div class="lrow${p.stage === "done" ? " lrow-done" : ""}" data-id="${escAttr(p.id)}" data-kind="plan">
+        <span class="lrow-id" style="color:#46c288">${escText(p.id)}</span>
+        <span class="lrow-title">${escText(displayTitle(p))}</span>
+        <span class="lrow-meta">${tasks.length ? `${done}/${tasks.length} tasks` : ""}${ralphLive ? '<span class="lrow-sep">·</span><span class="lrow-ralph">ralph live</span>' : ""}</span>
+        <span class="lrow-age">${shortTime(p.updatedAt)}</span>
+      </div>`;
+    })
+    .join("");
+
+  container.innerHTML = `
+    <div class="list-pane">
+      <div class="list-group-title"><span class="list-group-dot" style="background:#7b83eb"></span>Maps &amp; designs <span class="list-group-count">${designs.length}</span></div>
+      ${designRows || '<div class="view-empty-inline">No design documents.</div>'}
+      <div class="list-group-title"><span class="list-group-dot" style="background:#46c288"></span>Plans <span class="list-group-count">${plans.length}</span></div>
+      ${planRows || '<div class="view-empty-inline">No plans.</div>'}
+    </div>
+  `;
+
+  container.querySelectorAll(".lrow[data-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      if (el.dataset.kind === "design") showSddDetail(el.dataset.id);
+      else showPlanDetail(el.dataset.id);
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────── Decisions reader
+
+function decisionWeekGroups(decisions) {
+  const now = Date.now();
+  const week = 7 * 24 * 60 * 60 * 1000;
+  const groups = { thisWeek: [], lastWeek: [], older: {} };
+  for (const d of decisions) {
+    const t = new Date(d.updatedAt || d.createdAt || 0).getTime();
+    const age = now - t;
+    if (age < week) groups.thisWeek.push(d);
+    else if (age < 2 * week) groups.lastWeek.push(d);
+    else {
+      const dt = new Date(t);
+      const key = dt.toLocaleString(undefined, { month: "long", year: "numeric" });
+      (groups.older[key] = groups.older[key] || []).push(d);
+    }
+  }
+  return groups;
+}
+
+function renderDecisionsView() {
+  const container = document.getElementById("decisionsView");
+  if (!container) return;
+
+  const searchQuery = state.search.toLowerCase();
+  const decisions = state.items
+    .filter((item) => {
+      if (item.type !== "decision") return false;
+      if (!searchQuery) return true;
+      const title = (item.title || "").toLowerCase();
+      const id = (item.id || "").toLowerCase();
+      const body = (item.body || "").toLowerCase();
+      return title.includes(searchQuery) || id.includes(searchQuery) || body.includes(searchQuery);
+    })
+    .sort((a, b) => (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || ""));
+
+  if (decisions.length === 0) {
+    container.innerHTML = '<div class="view-empty">No decisions found.</div>';
+    return;
+  }
+
+  const groups = decisionWeekGroups(decisions);
+  const newest = groups.thisWeek[0] || null;
+
+  function featuredHTML(d) {
+    const related = (d.related || []).map(
+      (r) => `<span class="dd-chip dd-chip-ref" data-id="${escAttr(r)}">${escText(r)}</span>`,
+    );
+    const commentCount = (d.comments || []).length;
+    const bodyPreview = d.body ? mdToHtml(d.body.split("\n\n").slice(0, 2).join("\n\n")) : "";
+    return `
+      <div class="dd-featured" data-id="${escAttr(d.id)}">
+        <div class="dd-featured-head">
+          <span class="dd-id">${escText(d.id)}</span>
+          <span class="dd-featured-title">${escText(displayTitle(d))}</span>
+          <span class="dd-age">${shortTime(d.updatedAt || d.createdAt)}</span>
+        </div>
+        ${bodyPreview ? `<div class="dd-featured-body">${bodyPreview}</div>` : ""}
+        <div class="dd-featured-chips">
+          ${related.join("")}
+          ${commentCount ? `<span class="dd-chip">${commentCount} refinement${commentCount !== 1 ? "s" : ""} in thread</span>` : ""}
+        </div>
+      </div>`;
+  }
+
+  function rowHTML(d, faded) {
+    return `
+      <div class="dd-row${faded ? " dd-row-faded" : ""}" data-id="${escAttr(d.id)}">
+        <span class="dd-id">${escText(d.id)}</span>
+        <span class="dd-row-title">${escText(displayTitle(d))}</span>
+        <span class="dd-age">${shortTime(d.updatedAt || d.createdAt)}</span>
+      </div>`;
+  }
+
+  const parts = ['<div class="dd-reader">'];
+  if (groups.thisWeek.length > 0) {
+    parts.push('<div class="dd-group-label">This week</div>');
+    for (const d of groups.thisWeek) {
+      parts.push(d === newest ? featuredHTML(d) : rowHTML(d, false));
+    }
+  }
+  if (groups.lastWeek.length > 0) {
+    parts.push('<div class="dd-group-label">Last week</div>');
+    for (const d of groups.lastWeek) parts.push(rowHTML(d, false));
+  }
+  const olderKeys = Object.keys(groups.older);
+  for (const key of olderKeys) {
+    parts.push(`<div class="dd-group-label dd-group-label-faded">${escText(key)} · fading by design</div>`);
+    for (const d of groups.older[key]) parts.push(rowHTML(d, true));
+  }
+  parts.push("</div>");
+
+  container.innerHTML = parts.join("");
+
+  container.querySelectorAll("[data-id]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showDetailOverlay(el.dataset.id);
+    });
+  });
+  wireEntityRefs(container);
+}
+
+// ─────────────────────────────────────────────────────────── Archive view
+
+async function renderArchiveView() {
+  const container = document.getElementById("archiveView");
+  if (!container) return;
+  if (state.archived === null) {
+    container.innerHTML = '<div class="view-empty">Loading archive…</div>';
+    try {
+      state.archived = await apiFetch("/api/items/archived");
+    } catch {
+      state.archived = [];
+    }
+  }
+  const rows = (state.archived || [])
+    .filter(matchesSearch)
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+
+  if (rows.length === 0) {
+    container.innerHTML = '<div class="view-empty">Archive is empty.</div>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="list-pane">
+      ${rows
+        .map((t) => {
+          const kind = ticketKind(t);
+          return `
+        <div class="lrow lrow-done archive-row" data-id="${escAttr(t.id)}">
+          <span class="lrow-id" style="color:${kind ? kindColor(kind) : "#4a4e5e"}">${escText(t.id)}</span>
+          <span class="lrow-title">${escText(displayTitle(t))}</span>
+          <span class="lrow-age">${shortTime(t.updatedAt)}</span>
+        </div>
+        <div class="archive-body hidden" data-body-for="${escAttr(t.id)}"></div>`;
+        })
+        .join("")}
+    </div>
+  `;
+
+  container.querySelectorAll(".archive-row").forEach((el) => {
+    el.addEventListener("click", () => {
+      const body = container.querySelector(`[data-body-for="${CSS.escape(el.dataset.id)}"]`);
+      if (!body) return;
+      if (body.classList.contains("hidden")) {
+        const entity = (state.archived || []).find((a) => a.id === el.dataset.id);
+        body.innerHTML = `<div class="detail-body">${mdToHtml(entity?.body || "(no description)")}</div>`;
+        body.classList.remove("hidden");
+      } else {
+        body.classList.add("hidden");
+      }
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────── Right rail (needs you + activity)
+
+function authorAvatar(author) {
+  const a = (author || "").toLowerCase();
+  if (/terje/.test(a) || a === "user") return { initial: "T", cls: "avatar-terje" };
+  if (/claude/.test(a)) return { initial: "C", cls: "avatar-claude" };
+  if (/ralph|agent/.test(a)) return { initial: "R", cls: "avatar-agent" };
+  return { initial: (author || "?").charAt(0).toUpperCase(), cls: "avatar-neutral" };
+}
+
+function collectActivity() {
+  const events = [];
+  const pushComment = (entity, entityKind, c) => {
+    if (!c || !c.createdAt) return;
+    events.push({
+      when: c.createdAt,
+      author: c.author || "unknown",
+      text: (c.text || "").split("\n")[0].slice(0, 120),
+      refId: entity.id,
+      refKind: entityKind,
+      verb: "commented on",
+    });
+  };
+  for (const i of state.items) (i.comments || []).forEach((c) => pushComment(i, "item", c));
+  for (const d of state.designs) (d.comments || []).forEach((c) => pushComment(d, "design", c));
+  for (const p of state.plans) {
+    (p.comments || []).forEach((c) => pushComment(p, "plan", c));
+    for (const t of p.tasks || []) {
+      for (const n of t.progressNotes || []) {
+        if (!n || !n.timestamp) continue;
+        events.push({
+          when: n.timestamp,
+          author: "agent",
+          text: `${t.title ? t.title.split(":")[0] : t.id} — ${(n.text || "").split("\n")[0].slice(0, 110)}`,
+          refId: p.id,
+          refKind: "plan",
+          verb: "progressed",
+        });
+      }
+    }
+  }
+  // Recently resolved tickets
+  for (const i of state.items) {
+    if (isTicket(i) && isResolvedStage(i.stage) && i.updatedAt) {
+      events.push({
+        when: i.updatedAt,
+        author: "board",
+        text: displayTitle(i).slice(0, 110),
+        refId: i.id,
+        refKind: "item",
+        verb: "resolved",
+      });
+    }
+  }
+  events.sort((a, b) => (b.when || "").localeCompare(a.when || ""));
+  return events.slice(0, 30);
+}
+
+function collectNeedsYou() {
+  const needs = [];
+  const byId = itemsById();
+
+  // Frontier judgment tickets (grill / probe)
+  for (const t of state.items) {
+    if (!isTicket(t) || isResolvedStage(t.stage)) continue;
+    const kind = ticketKind(t);
+    if (!HITL_KINDS.has(kind)) continue;
+    if (unresolvedBlockers(t, byId).length > 0) continue;
+    needs.push({
+      label: `${kind === "grill" ? "Grill" : "Probe"} session on`,
+      refId: t.id,
+      color: kindColor(kind),
+    });
+  }
+
+  // Plans waiting on a human gate
+  for (const p of state.plans) {
+    if (p.stage === "done") continue;
+    for (const t of p.tasks || []) {
+      if (t.status === "in_progress" && /terje|feel.?gate|play session/i.test(`${t.verification || ""} ${t.title || ""}`)) {
+        needs.push({ label: "Feel-gate on", refId: p.id, color: "#46c288" });
+        break;
+      }
+    }
+  }
+
+  // Tickets whose last word was the agent's, waiting on a ruling
+  for (const t of state.items) {
+    if (!isTicket(t) || isResolvedStage(t.stage)) continue;
+    const comments = t.comments || [];
+    const last = comments[comments.length - 1];
+    if (!last) continue;
+    const av = authorAvatar(last.author);
+    if (av.cls !== "avatar-terje" && /ruling|options for|awaiting|needs terje/i.test(`${t.title} ${last.text || ""}`)) {
+      needs.push({ label: "Ruling on", refId: t.id, color: "#e6e7ec" });
+    }
+  }
+
+  // Dedup by refId, cap 5
+  const seen = new Set();
+  return needs.filter((n) => (seen.has(n.refId) ? false : (seen.add(n.refId), true))).slice(0, 5);
+}
+
+function renderRail() {
+  const needsEl = document.getElementById("railNeeds");
+  const actEl = document.getElementById("railActivity");
+  if (!needsEl || !actEl) return;
+
+  const needs = collectNeedsYou();
+  if (needs.length === 0) {
+    needsEl.classList.add("hidden");
+  } else {
+    needsEl.classList.remove("hidden");
+    needsEl.innerHTML = `
+      <div class="needs-title">Needs you · ${needs.length}</div>
+      <div class="needs-list">
+        ${needs
+          .map(
+            (n) =>
+              `<div class="needs-row" data-id="${escAttr(n.refId)}">${escText(n.label)} <span class="needs-ref" style="color:${n.color}">${escText(n.refId)}</span></div>`,
+          )
+          .join("")}
+      </div>`;
+    needsEl.querySelectorAll(".needs-row").forEach((el) => {
+      el.addEventListener("click", () => openEntityById(el.dataset.id));
+    });
+  }
+
+  const events = collectActivity();
+  actEl.innerHTML = events
+    .map((ev) => {
+      const av = authorAvatar(ev.author);
+      const refColor = kindColor(ticketKind(state.items.find((i) => i.id === ev.refId)));
+      return `
+      <div class="act-row" data-id="${escAttr(ev.refId)}">
+        <span class="act-avatar ${av.cls}">${av.initial}</span>
+        <div class="act-body">
+          <div class="act-line"><strong>${escText(ev.author)}</strong> ${escText(ev.verb)} <span class="act-ref" style="color:${refColor}">${escText(ev.refId)}</span></div>
+          <div class="act-text">${escText(ev.text)}</div>
+          <div class="act-when">${relativeTime(ev.when)}</div>
+        </div>
+      </div>`;
+    })
+    .join("") || '<div class="act-empty">No activity yet.</div>';
+
+  actEl.querySelectorAll(".act-row").forEach((el) => {
+    el.addEventListener("click", () => openEntityById(el.dataset.id));
+  });
 }
 
 // ─────────────────────────────────────────────────────────── Tests view
@@ -1001,179 +2054,148 @@ function renderTestRow(test) {
 
 const TESTS_FILTER_LABELS = {
   all: "All",
-  flagged: "Flagged",
-  orphans: "Orphans",
+  failing: "Failing",
+  drifted: "Drifted",
   stale: "Stale",
+  guarded: "Guarded",
 };
+
 const TESTS_SORT_LABELS = {
-  directory: "Directory (default)",
+  directory: "Directory",
   name: "Name",
-  last_run: "Last run",
   drift: "Drift severity",
+  recency: "Last run",
 };
+
 const DRIFT_SEVERITY_WEIGHT = { broken: 3, suspect: 2, warn: 1 };
 
 function testCategory(test) {
-  const dir = test.directory || "tests";
-  const parts = dir.split("/").filter(Boolean);
-  return parts[1] || parts[0] || "other";
+  const file = test.file || "";
+  const parts = file.split("/");
+  if (parts.length > 1) return parts.slice(0, -1).join("/");
+  return "(root)";
 }
 
 function testIsStale(test) {
-  if (!test.last_run_at) return false;
+  if (!test.last_run_at) return true;
   return Date.now() - new Date(test.last_run_at).getTime() > 24 * 60 * 60 * 1000;
 }
 
 function testMaxDriftWeight(test) {
-  return (test.drift || []).reduce((max, d) => {
-    const w = DRIFT_SEVERITY_WEIGHT[d.severity] || 0;
-    return w > max ? w : max;
-  }, 0);
+  let max = 0;
+  for (const d of test.drift || []) {
+    const w = DRIFT_SEVERITY_WEIGHT[d.severity] || 1;
+    if (w > max) max = w;
+  }
+  return max;
 }
 
 function testMatchesFilter(test, filter) {
   if (filter === "all") return true;
-  if (filter === "flagged") return (test.drift || []).length > 0;
-  if (filter === "orphans") return (test.drift || []).some((d) => d.code === "orphan_test");
+  if (filter === "failing") return test.status === "failing" || test.status === "broken";
+  if (filter === "drifted") return (test.drift || []).length > 0;
   if (filter === "stale") return testIsStale(test);
+  if (filter === "guarded") return (test.guards || []).length > 0;
   return true;
 }
 
 function testMatchesSearch(test, needle) {
   if (!needle) return true;
   const q = needle.toLowerCase();
-  const hay = `${test.name || ""} ${test.summary || ""}`.toLowerCase();
-  return hay.includes(q);
+  return (
+    (test.name || "").toLowerCase().includes(q) ||
+    (test.file || "").toLowerCase().includes(q) ||
+    (test.guards || []).some((g) => g.toLowerCase().includes(q))
+  );
 }
 
 function sortTests(tests, sort) {
-  const list = tests.slice();
+  const copy = [...tests];
   if (sort === "name") {
-    list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-  } else if (sort === "last_run") {
-    list.sort((a, b) => {
-      const at = a.last_run_at ? new Date(a.last_run_at).getTime() : 0;
-      const bt = b.last_run_at ? new Date(b.last_run_at).getTime() : 0;
-      return bt - at;
-    });
+    copy.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
   } else if (sort === "drift") {
-    list.sort((a, b) => {
-      const dw = testMaxDriftWeight(b) - testMaxDriftWeight(a);
-      if (dw !== 0) return dw;
-      const dc = (b.drift || []).length - (a.drift || []).length;
-      if (dc !== 0) return dc;
-      return (a.name || "").localeCompare(b.name || "");
-    });
+    copy.sort((a, b) => testMaxDriftWeight(b) - testMaxDriftWeight(a) || (a.name || "").localeCompare(b.name || ""));
+  } else if (sort === "recency") {
+    copy.sort((a, b) => (b.last_run_at || "").localeCompare(a.last_run_at || ""));
   } else {
-    list.sort((a, b) => (a.file || a.name || "").localeCompare(b.file || b.name || ""));
+    copy.sort((a, b) => (a.file || "").localeCompare(b.file || "") || (a.name || "").localeCompare(b.name || ""));
   }
-  return list;
+  return copy;
 }
 
 function computeFilteredTests(cat) {
-  const all = cat.tests || [];
-  const filtered = all.filter(
-    (t) => testMatchesFilter(t, state.testsFilter) && testMatchesSearch(t, state.testsSearch),
+  const tests = cat.tests || [];
+  return sortTests(
+    tests.filter((t) => testMatchesFilter(t, state.testsFilter) && testMatchesSearch(t, state.testsSearch)),
+    state.testsSort,
   );
-  return filtered;
 }
 
 function renderTestsCountsLine(cat, filtered) {
-  const driftTotal = filtered.reduce((sum, t) => sum + (t.drift || []).length, 0);
-  const passed = filtered.filter((t) => t.status === "passed").length;
-  const failed = filtered.filter((t) => t.status === "failed").length;
-  const skipped = filtered.filter((t) => t.status === "skipped").length;
-  const stalenessNote = cat.summary_stale
-    ? `<span class="tests-staleness">summary.json stale — statuses may be out of date</span>`
-    : "";
-  return `
-    <span class="tests-count tests-count-total"><strong>${filtered.length}</strong> tests</span>
-    <span class="tests-count-sep">·</span>
-    <span class="tests-count tests-count-flagged"><strong>${driftTotal}</strong> flagged</span>
-    ${passed > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-passed"><strong>${passed}</strong> passed</span>` : ""}
-    ${failed > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-failed"><strong>${failed}</strong> failed</span>` : ""}
-    ${skipped > 0 ? `<span class="tests-count-sep">·</span><span class="tests-count tests-count-skipped"><strong>${skipped}</strong> skipped</span>` : ""}
-    ${stalenessNote}
-  `;
+  const tests = cat.tests || [];
+  const failing = tests.filter((t) => testMatchesFilter(t, "failing")).length;
+  const drifted = tests.filter((t) => testMatchesFilter(t, "drifted")).length;
+  const stale = tests.filter((t) => testMatchesFilter(t, "stale")).length;
+  const bits = [`${filtered.length} of ${tests.length} tests`];
+  if (failing) bits.push(`${failing} failing`);
+  if (drifted) bits.push(`${drifted} drifted`);
+  if (stale) bits.push(`${stale} stale`);
+  return `<div class="tests-counts">${bits.join(" · ")}</div>`;
 }
 
 function renderCategoryChips(cat, filtered) {
-  const allCategories = new Set((cat.tests || []).map(testCategory));
-  const order = Array.from(allCategories).sort();
-  const counts = {};
-  for (const cat of order) counts[cat] = 0;
-  for (const t of filtered) {
-    const c = testCategory(t);
-    if (c in counts) counts[c] += 1;
-  }
-  return order
+  return "";
+}
+
+function renderFilterChips() {
+  return Object.entries(TESTS_FILTER_LABELS)
     .map(
-      (c) =>
-        `<span class="category-chip" data-category="${escAttr(c)}">[${escText(c)}] <strong>${counts[c]}</strong></span>`,
+      ([key, label]) =>
+        `<button class="tests-chip${state.testsFilter === key ? " tests-chip-active" : ""}" data-filter="${key}">${label}</button>`,
     )
     .join("");
 }
 
-function renderFilterChips() {
-  return Object.keys(TESTS_FILTER_LABELS)
-    .map((f) => {
-      const active = f === state.testsFilter ? " filter-chip-active" : "";
-      return `<button type="button" class="filter-chip${active}" data-filter="${escAttr(f)}">${escText(TESTS_FILTER_LABELS[f])}</button>`;
-    })
-    .join("");
-}
-
 function renderSortSelect() {
-  const opts = Object.keys(TESTS_SORT_LABELS)
-    .map((k) => {
-      const sel = k === state.testsSort ? " selected" : "";
-      return `<option value="${escAttr(k)}"${sel}>${escText(TESTS_SORT_LABELS[k])}</option>`;
-    })
-    .join("");
-  return `<select class="tests-sort-select" id="testsSortSelect" aria-label="Sort tests">${opts}</select>`;
+  return `<select class="tests-sort" id="testsSortSelect">${Object.entries(TESTS_SORT_LABELS)
+    .map(
+      ([key, label]) =>
+        `<option value="${key}"${state.testsSort === key ? " selected" : ""}>${label}</option>`,
+    )
+    .join("")}</select>`;
 }
 
 function renderTestsGroupsHTML(filtered) {
   if (filtered.length === 0) {
-    return `<div class="tests-empty-filter">No tests match the current filter.</div>`;
+    return '<div class="tests-empty">No tests match the current filter.</div>';
   }
-  const groups = {};
+  if (state.testsSort !== "directory") {
+    return filtered.map(renderTestRow).join("");
+  }
+  const groups = new Map();
   for (const t of filtered) {
-    const dir = t.directory || "tests";
-    if (!groups[dir]) groups[dir] = [];
-    groups[dir].push(t);
+    const cat = testCategory(t);
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(t);
   }
-  const dirs = Object.keys(groups).sort();
-  return dirs
-    .map((dir) => {
-      const rows = sortTests(groups[dir], state.testsSort).map(renderTestRow).join("");
-      return `
-        <section class="tests-group">
-          <h3 class="tests-group-header"><span class="tests-group-dir">${escText(dir)}</span><span class="tests-group-count">${groups[dir].length}</span></h3>
-          <div class="tests-group-body">${rows}</div>
-        </section>
-      `;
-    })
-    .join("");
+  const parts = [];
+  for (const [cat, tests] of groups) {
+    parts.push(`<div class="tests-group"><div class="tests-group-title">${escText(cat)} <span class="tests-group-count">${tests.length}</span></div>${tests.map(renderTestRow).join("")}</div>`);
+  }
+  return parts.join("");
 }
 
 function renderTestsHTML(cat) {
   const filtered = computeFilteredTests(cat);
   return `
-    <div class="tests-view-inner">
-      <header class="tests-header">
-        <h2 class="tests-title">Test catalogue</h2>
-        <div class="tests-counts" id="testsCounts">${renderTestsCountsLine(cat, filtered)}</div>
-        <div class="tests-category-chips" id="testsCategoryChips">${renderCategoryChips(cat, filtered)}</div>
-      </header>
-      ${renderCodebaseDriftSection(cat.codebase_drift)}
-      <div class="tests-controls">
-        <input type="search" class="tests-search" id="testsSearch" placeholder="search name or summary…" value="${escAttr(state.testsSearch || "")}" aria-label="Search tests">
-        <div class="tests-filter-chips" role="group" aria-label="Filter tests">${renderFilterChips()}</div>
-        <label class="tests-sort-label">Sort: ${renderSortSelect()}</label>
-      </div>
-      <div class="tests-list" id="testsList">${renderTestsGroupsHTML(filtered)}</div>
+    <div class="tests-toolbar">
+      <input type="search" class="tests-search" id="testsSearchInput" placeholder="Search tests…" value="${escAttr(state.testsSearch)}">
+      <div class="tests-chips" id="testsChipRow">${renderFilterChips()}</div>
+      ${renderSortSelect()}
     </div>
+    ${renderTestsCountsLine(cat, filtered)}
+    ${renderCodebaseDriftSection(cat.codebaseDrift)}
+    <div class="tests-groups" id="testsGroups">${renderTestsGroupsHTML(filtered)}</div>
   `;
 }
 
@@ -1181,34 +2203,29 @@ function applyTestsFilters() {
   const cat = state.testsCatalogue;
   if (!cat) return;
   const filtered = computeFilteredTests(cat);
-  const countsEl = document.getElementById("testsCounts");
-  const chipsEl = document.getElementById("testsCategoryChips");
-  const listEl = document.getElementById("testsList");
-  if (countsEl) countsEl.innerHTML = renderTestsCountsLine(cat, filtered);
-  if (chipsEl) chipsEl.innerHTML = renderCategoryChips(cat, filtered);
-  if (listEl) listEl.innerHTML = renderTestsGroupsHTML(filtered);
+  const groups = document.getElementById("testsGroups");
+  if (groups) groups.innerHTML = renderTestsGroupsHTML(filtered);
+  const counts = document.querySelector(".tests-counts");
+  if (counts) counts.outerHTML = renderTestsCountsLine(cat, filtered);
+  const chipRow = document.getElementById("testsChipRow");
+  if (chipRow) chipRow.innerHTML = renderFilterChips();
 }
 
 function bindTestsViewHandlers(container) {
-  const searchInput = container.querySelector("#testsSearch");
+  const searchInput = container.querySelector("#testsSearchInput");
   if (searchInput) {
     const onSearch = debounce(() => {
-      state.testsSearch = searchInput.value || "";
+      state.testsSearch = searchInput.value.trim();
       applyTestsFilters();
-    }, 120);
+    }, 200);
     searchInput.addEventListener("input", onSearch);
   }
-  const chipRow = container.querySelector(".tests-filter-chips");
+  const chipRow = container.querySelector("#testsChipRow");
   if (chipRow) {
     chipRow.addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-filter]");
-      if (!btn) return;
-      const filter = btn.getAttribute("data-filter");
-      if (!filter || filter === state.testsFilter) return;
-      state.testsFilter = filter;
-      chipRow.querySelectorAll(".filter-chip").forEach((el) => {
-        el.classList.toggle("filter-chip-active", el.getAttribute("data-filter") === filter);
-      });
+      const chip = e.target.closest(".tests-chip");
+      if (!chip) return;
+      state.testsFilter = chip.dataset.filter;
       applyTestsFilters();
     });
   }
@@ -1221,469 +2238,8 @@ function bindTestsViewHandlers(container) {
   }
 }
 
-// ─────────────────────────────────────────────────────────── Decisions view
-
-function renderDecisionsView(selectedId) {
-  const container = document.getElementById("decisionsView");
-  if (!container) return;
-
-  const searchQuery = state.search.toLowerCase();
-  const decisions = state.items.filter((item) => {
-    if (item.type !== "decision") return false;
-    if (!searchQuery) return true;
-    const title = (item.title || "").toLowerCase();
-    const id = (item.id || "").toLowerCase();
-    const body = (item.body || "").toLowerCase();
-    return title.includes(searchQuery) || id.includes(searchQuery) || body.includes(searchQuery);
-  });
-
-  // Group by pillar
-  const groups = {};
-  decisions.forEach((item) => {
-    const pillars = parsePillars(item.pillar);
-    if (pillars.length === 0) pillars.push("Uncategorized");
-    pillars.forEach((p) => {
-      if (!groups[p]) groups[p] = [];
-      groups[p].push(item);
-    });
-  });
-
-  const sortedPillars = Object.keys(groups).sort((a, b) => {
-    if (a === "Uncategorized") return 1;
-    if (b === "Uncategorized") return -1;
-    return a.localeCompare(b);
-  });
-
-  // Resolve which DD to show — keep current selection if still visible
-  const allVisibleIds = decisions.map((d) => d.id);
-  let activeId = selectedId || state._ddSelectedId || null;
-  if (activeId && !allVisibleIds.includes(activeId)) activeId = null;
-  if (!activeId && allVisibleIds.length > 0) activeId = allVisibleIds[0];
-  state._ddSelectedId = activeId;
-
-  const activeItem = activeId ? state.items.find((i) => i.id === activeId) : null;
-
-  // Build list pane
-  const listHTML = sortedPillars.length === 0
-    ? '<div class="dd-empty">No decisions found.</div>'
-    : sortedPillars.map((pillar) => `
-        <div class="dd-group">
-          <div class="dd-group-header">
-            <span class="dd-group-title">${escText(pillar)}</span>
-            <span class="dd-group-count">${groups[pillar].length}</span>
-          </div>
-          ${groups[pillar].map((item) => `
-            <div class="dd-card${item.id === activeId ? " dd-card-active" : ""}" data-id="${escAttr(item.id)}">
-              <span class="dd-card-id">${escText(item.id)}</span>
-              <span class="dd-card-title">${escText(item.title)}</span>
-            </div>
-          `).join("")}
-        </div>
-      `).join("");
-
-  // Build detail pane
-  let detailHTML = "";
-  if (activeItem) {
-    const bodyHTML = activeItem.body
-      ? mdToHtml(activeItem.body)
-      : '<p style="color:var(--text-muted)">No description</p>';
-    const pillarBadges = parsePillars(activeItem.pillar)
-      .map((p) => `<span class="badge badge-pillar">${escText(p)}</span>`)
-      .join("");
-
-    // Related items
-    const relatedItems = (activeItem.related || [])
-      .map((rid) => state.items.find((i) => i.id === rid))
-      .filter(Boolean);
-    const relatedHTML = relatedItems.length > 0
-      ? relatedItems.map((r) => `
-          <div class="related-item" data-id="${escAttr(r.id)}">
-            <span class="item-id">${escText(r.id)}</span>
-            <span>${escText(r.title)}</span>
-          </div>
-        `).join("")
-      : "";
-
-    detailHTML = `
-      <div class="dd-detail-toolbar">
-        <div class="dd-detail-header">
-          <span class="dd-detail-id">${escText(activeItem.id)}</span>
-          ${pillarBadges}
-        </div>
-        <div class="dd-detail-actions">
-          <button class="btn btn-secondary btn-sm" id="ddGeneratePrompt">Generate Prompt</button>
-          <button class="btn btn-secondary btn-sm" id="ddFileIssue">File Issue from DD</button>
-        </div>
-      </div>
-      <div class="dd-detail-doc">
-        <h2 class="dd-detail-title">${escText(activeItem.title)}</h2>
-        <div class="detail-body">${bodyHTML}</div>
-        ${renderTestsWidget(activeItem.tests)}
-        ${relatedHTML ? `
-          <div class="detail-section">
-            <div class="detail-section-title">Related Items</div>
-            <div id="ddRelated">${relatedHTML}</div>
-          </div>
-        ` : ""}
-        <div class="detail-section">
-          <div class="detail-section-title">Comments</div>
-          <div id="ddCommentThread"></div>
-        </div>
-        <div class="prompt-preview hidden" id="ddPromptPreview"></div>
-      </div>
-    `;
-  } else {
-    detailHTML = '<div class="dd-empty">Select a decision to view details.</div>';
-  }
-
-  container.innerHTML = `
-    <div class="dd-index">${listHTML}</div>
-    <div class="dd-detail">${detailHTML}</div>
-  `;
-
-  // Wire list clicks
-  container.querySelectorAll(".dd-card[data-id]").forEach((el) => {
-    el.addEventListener("click", () => {
-      renderDecisionsView(el.dataset.id);
-    });
-  });
-
-  // Wire detail interactions
-  if (activeItem) {
-    // Related item clicks
-    container.querySelectorAll("#ddRelated .related-item[data-id]").forEach((el) => {
-      el.addEventListener("click", () => showDetailOverlay(el.dataset.id));
-    });
-
-    // Comment thread
-    renderComments(
-      activeItem.comments || [],
-      "items",
-      activeItem.id,
-      document.getElementById("ddCommentThread"),
-      () => renderDecisionsView(activeItem.id),
-    );
-
-    document.getElementById("ddGeneratePrompt").addEventListener("click", () => {
-      generateAndShowPrompt(
-        { entityType: "item", entityId: activeItem.id, includeQmd: true },
-        document.getElementById("ddPromptPreview"),
-      );
-    });
-
-    document.getElementById("ddFileIssue").addEventListener("click", () => {
-      // Open the new-item modal pre-filled with a reference to this DD
-      openNewItemModal("inbox");
-      const form = document.getElementById("newItemForm");
-      if (!form) return;
-      form.querySelector('[name="type"]').value = "issue";
-      form.querySelector('[name="title"]').value = "";
-      form.querySelector('[name="body"]').value =
-        `Related to ${activeItem.id}: ${activeItem.title}\n\n`;
-      form.querySelector('[name="title"]').focus();
-    });
-  }
-}
-
-// ─────────────────────────────────────────────────────────── Board rendering
-
-function renderBoard() {
-  const searchQuery = state.search.toLowerCase();
-
-  COLUMNS.forEach((stage) => {
-    const cardsContainer = document.getElementById(`cards-${stage}`);
-    const countEl = document.getElementById(`count-${stage}`);
-    if (!cardsContainer) return;
-
-    const cards = [];
-
-    // Items matching this column stage
-    if (stage === "done") {
-      // Done column: all entity types that are done
-      state.items.forEach((item) => {
-        if (item.stage === "done" || item.stage === "closed")
-          cards.push({ entity: item, type: "item" });
-      });
-      state.designs.forEach((d) => {
-        if (d.stage === "done") cards.push({ entity: d, type: "design" });
-      });
-      state.plans.forEach((p) => {
-        if (p.stage === "done") cards.push({ entity: p, type: "plan" });
-      });
-    } else if (stage === "sdd") {
-      // SDD column: items with stage 'sdd' + designs not done
-      state.items.forEach((item) => {
-        if (item.stage === "sdd") cards.push({ entity: item, type: "item" });
-      });
-      state.designs.forEach((d) => {
-        if (d.stage !== "done") cards.push({ entity: d, type: "design" });
-      });
-    } else if (stage === "planned") {
-      // Planned column: items with stage 'planned' + plans not done
-      state.items.forEach((item) => {
-        if (item.stage === "planned")
-          cards.push({ entity: item, type: "item" });
-      });
-      state.plans.forEach((p) => {
-        if (p.stage !== "done") cards.push({ entity: p, type: "plan" });
-      });
-    } else {
-      // inbox, exploring: items only
-      state.items.forEach((item) => {
-        if (item.stage === stage) cards.push({ entity: item, type: "item" });
-      });
-    }
-
-    // Exclude decisions from the kanban (they live in the Decisions view)
-    const nonDecision = cards.filter((c) => c.type !== "item" || c.entity.type !== "decision");
-
-    // Sprint filter: when a sprint is active, show only sprint items + unassigned inbox items
-    let sprintFiltered = nonDecision;
-    if (state.selectedSprintId) {
-      const sprintId = state.selectedSprintId;
-      sprintFiltered = cards.filter((c) => {
-        const e = c.entity;
-        // Always show items assigned to this sprint
-        if (e.sprintId === sprintId) return true;
-        // Also show unassigned inbox items (so they can be dragged into the sprint)
-        if (stage === "inbox" && !e.sprintId) return true;
-        return false;
-      });
-    }
-
-    // Search filter
-    const filtered = searchQuery
-      ? sprintFiltered.filter((c) => {
-          const e = c.entity;
-          const title = (e.title || e.name || "").toLowerCase();
-          const id = (e.id || "").toLowerCase();
-          return title.includes(searchQuery) || id.includes(searchQuery);
-        })
-      : sprintFiltered;
-
-    // Type filter
-    const final =
-      state.typeFilter.size > 0
-        ? filtered.filter(
-            (c) => c.type !== "item" || state.typeFilter.has(c.entity.type),
-          )
-        : filtered;
-
-    // Sort newest first so recently created items appear at the top
-    final.sort((a, b) => {
-      const ta = a.entity.createdAt || "";
-      const tb = b.entity.createdAt || "";
-      return tb.localeCompare(ta);
-    });
-
-    // Update count
-    if (countEl) countEl.textContent = final.length;
-
-    // Render cards
-    cardsContainer.innerHTML = final
-      .map((c) => buildCardHTML(c.entity, c.type))
-      .join("");
-
-    // Stagger animation
-    cardsContainer.querySelectorAll(".card").forEach((cardEl, i) => {
-      cardEl.style.setProperty("--i", i);
-    });
-  });
-}
-
-// Delegated card click handler — wired once in initDragAndDrop on the board
-function handleCardClick(e) {
-  const card = e.target.closest(".card");
-  if (!card || state.draggedCard) return;
-  const entityType = card.dataset.entityType;
-  const entityId = card.dataset.entityId;
-  if (entityType === "item") showDetailOverlay(entityId);
-  else if (entityType === "design") showSddDetail(entityId);
-  else if (entityType === "plan") showPlanDetail(entityId);
-}
-
-/** Determine which column stage an entity belongs in */
-function stageForEntity(entity, type) {
-  const stage = entity.stage;
-  if (stage === "done" || stage === "closed") return "done";
-  if (type === "design") return stage || "sdd";
-  if (type === "plan") return stage || "planned";
-  return stage || "inbox";
-}
-
-/** Surgically update a single card in the DOM without rebuilding everything */
-function patchCard(entity, type) {
-  const board = document.getElementById("kanbanBoard");
-  if (!board) return;
-  const selector = `.card[data-entity-id="${CSS.escape(entity.id)}"]`;
-  const existing = board.querySelector(selector);
-  const newStage = stageForEntity(entity, type);
-  const targetContainer = document.getElementById(`cards-${newStage}`);
-
-  const newHTML = buildCardHTML(entity, type);
-
-  if (existing) {
-    const currentContainer = existing.closest(".kanban-cards");
-    const temp = document.createElement("div");
-    temp.innerHTML = newHTML;
-    const newCard = temp.firstElementChild;
-    if (currentContainer === targetContainer) {
-      // Same column — replace in-place, keep position
-      existing.replaceWith(newCard);
-    } else {
-      // Moving columns — remove from old, prepend to new (most recent at top)
-      existing.remove();
-      if (targetContainer) {
-        targetContainer.prepend(newCard);
-      }
-    }
-  } else if (targetContainer) {
-    // New card — prepend to target column (most recent at top)
-    targetContainer.insertAdjacentHTML("afterbegin", newHTML);
-  }
-  // Update column counts
-  updateColumnCounts();
-}
-
-/** Remove a card from the DOM */
-function removeCard(id) {
-  const board = document.getElementById("kanbanBoard");
-  if (!board) return;
-  const card = board.querySelector(`.card[data-entity-id="${CSS.escape(id)}"]`);
-  if (card) card.remove();
-  updateColumnCounts();
-}
-
-/** Recount cards in each column */
-function updateColumnCounts() {
-  COLUMNS.forEach((stage) => {
-    const container = document.getElementById(`cards-${stage}`);
-    const countEl = document.getElementById(`count-${stage}`);
-    if (container && countEl) {
-      countEl.textContent = container.querySelectorAll(".card").length;
-    }
-  });
-}
-
-// ─────────────────────────────────────────────────────────── Drag and Drop
-
-function initDragAndDrop() {
-  const board = document.getElementById("kanbanBoard");
-  if (!board) return;
-
-  // Delegated card click
-  board.addEventListener("click", handleCardClick);
-
-  // Dragstart — delegated on the board
-  board.addEventListener("dragstart", (e) => {
-    const card = e.target.closest(".card");
-    if (!card) return;
-    const entityType = card.dataset.entityType;
-    const entityId = card.dataset.entityId;
-    state.draggedCard = { type: entityType, id: entityId };
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", JSON.stringify(state.draggedCard));
-    card.classList.add("dragging");
-  });
-
-  board.addEventListener("dragend", (e) => {
-    const card = e.target.closest(".card");
-    if (card) card.classList.remove("dragging");
-    state.draggedCard = null;
-    // Clean up all drag-over classes
-    board
-      .querySelectorAll(".kanban-col.drag-over")
-      .forEach((col) => col.classList.remove("drag-over"));
-  });
-
-  // Dragover / dragleave / drop on columns
-  board.querySelectorAll(".kanban-col").forEach((col) => {
-    col.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      col.classList.add("drag-over");
-    });
-
-    col.addEventListener("dragleave", (e) => {
-      // Only remove if actually leaving the column (not entering a child)
-      if (!col.contains(e.relatedTarget)) {
-        col.classList.remove("drag-over");
-      }
-    });
-
-    col.addEventListener("drop", async (e) => {
-      e.preventDefault();
-      col.classList.remove("drag-over");
-
-      let data = state.draggedCard;
-      if (!data) {
-        try {
-          data = JSON.parse(e.dataTransfer.getData("text/plain"));
-        } catch {
-          return;
-        }
-      }
-      if (!data || !data.type || !data.id) return;
-
-      const targetStage = col.dataset.stage;
-      const validStages = VALID_DROPS[data.type];
-      if (!validStages || !validStages.includes(targetStage)) {
-        showToast(`Cannot move ${data.type} to ${targetStage}`, "error");
-        return;
-      }
-
-      // Determine the API endpoint
-      let endpoint;
-      if (data.type === "item") {
-        endpoint = `/api/items/${data.id}`;
-      } else if (data.type === "design") {
-        endpoint = `/api/designs/${data.id}`;
-      } else if (data.type === "plan") {
-        endpoint = `/api/plans/${data.id}`;
-      }
-
-      try {
-        // Build patch payload — include sprintId if active sprint and entity is unassigned
-        const patchData = { stage: targetStage };
-        if (state.selectedSprintId) {
-          // Find the entity to check if it's unassigned
-          let entity = null;
-          if (data.type === "item")
-            entity = state.items.find((i) => i.id === data.id);
-          else if (data.type === "design")
-            entity = state.designs.find((d) => d.id === data.id);
-          else if (data.type === "plan")
-            entity = state.plans.find((p) => p.id === data.id);
-          if (entity && !entity.sprintId) {
-            patchData.sprintId = state.selectedSprintId;
-          }
-        }
-
-        await apiFetch(endpoint, {
-          method: "PATCH",
-          body: JSON.stringify(patchData),
-        });
-        showToast(`Moved to ${targetStage}`);
-      } catch (err) {
-        // Error already toasted by apiFetch
-      }
-
-      state.draggedCard = null;
-    });
-  });
-}
-
 // ─────────────────────────────────────────────────────────── Shared comment thread helper
 
-/**
- * Render a comment thread into a container and wire up the add-comment form.
- * Used by item, SDD, and plan detail overlays for consistent UI.
- * @param {Array} comments - array of comment objects
- * @param {string} entityType - 'items' | 'designs' | 'plans'
- * @param {string} entityId - entity ID for the API endpoint
- * @param {HTMLElement} container - DOM element to render into
- * @param {Function} onCommentAdded - callback after comment is posted (e.g. re-render overlay)
- */
 function renderComments(
   comments,
   entityType,
@@ -1693,12 +2249,17 @@ function renderComments(
 ) {
   const commentsHTML = (comments || [])
     .map((c) => {
-      const isUser = (c.author || "").toLowerCase() !== "claude";
+      const av = authorAvatar(c.author);
       return `
-      <div class="comment ${isUser ? "comment-user" : "comment-claude"}">
-        <div class="comment-author">${escText(c.author || "Unknown")}</div>
-        <div class="comment-text">${mdToHtml(c.text || "")}</div>
-        <div class="comment-time">${relativeTime(c.createdAt)}</div>
+      <div class="comment">
+        <span class="act-avatar ${av.cls}">${av.initial}</span>
+        <div class="comment-main">
+          <div class="comment-head">
+            <span class="comment-author">${escText(c.author || "Unknown")}</span>
+            <span class="comment-time">${relativeTime(c.createdAt)}</span>
+          </div>
+          <div class="comment-text">${mdToHtml(c.text || "")}</div>
+        </div>
       </div>
     `;
     })
@@ -1706,16 +2267,15 @@ function renderComments(
 
   container.innerHTML = `
     <div class="comments-section">
-      <div class="comments-title">Comments</div>
-      <div class="comment-list" id="commentList">${commentsHTML}</div>
+      <div class="comments-title">Thread${comments && comments.length ? ` · ${comments.length}` : ""}</div>
+      <div class="comment-list" id="commentList">${commentsHTML || '<div class="comments-empty">No messages yet.</div>'}</div>
       <div class="comment-form">
-        <textarea id="commentInput" placeholder="Add a comment..." rows="2"></textarea>
-        <button class="btn btn-primary btn-sm" id="addCommentBtn">Add Comment</button>
+        <textarea id="commentInput" placeholder="Comment — markdown, drop images…" rows="2"></textarea>
+        <button class="btn btn-primary btn-sm" id="addCommentBtn">Send</button>
       </div>
     </div>
   `;
 
-  // Wire add comment
   container
     .querySelector("#addCommentBtn")
     .addEventListener("click", async () => {
@@ -1735,22 +2295,26 @@ function renderComments(
       }
     });
 
-  // Scroll to bottom
+  // Cmd+Enter submits
+  const input = container.querySelector("#commentInput");
+  input?.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      container.querySelector("#addCommentBtn")?.click();
+    }
+  });
+  initImageUpload(input);
+
   const commentList = container.querySelector("#commentList");
   if (commentList) commentList.scrollTop = commentList.scrollHeight;
+  wireEntityRefs(commentList);
 }
 
 // ─────────────────────────────────────────────────────────── Prompt generation helpers
 
-/**
- * Generate a prompt via the API and show it in a preview container.
- * @param {Object} opts - { entityType, entityId, includeQmd }
- * @param {HTMLElement} previewEl - container for the prompt preview
- */
 async function generateAndShowPrompt(opts, previewEl) {
   previewEl.classList.remove("hidden");
   previewEl.innerHTML =
-    '<span style="color:var(--text-muted)">Generating...</span>';
+    '<span style="color:var(--text-3)">Generating...</span>';
   try {
     const result = await apiFetch("/api/context/prompt", {
       method: "POST",
@@ -1779,7 +2343,7 @@ async function generateAndShowPrompt(opts, previewEl) {
 async function generateAndShowReviewPrompt(opts, previewEl) {
   previewEl.classList.remove("hidden");
   previewEl.innerHTML =
-    '<span style="color:var(--text-muted)">Generating review prompt (includes QMD queries)...</span>';
+    '<span style="color:var(--text-3)">Generating review prompt (includes QMD queries)...</span>';
   try {
     const result = await apiFetch("/api/context/review", {
       method: "POST",
@@ -1805,11 +2369,6 @@ async function generateAndShowReviewPrompt(opts, previewEl) {
   }
 }
 
-/**
- * Show a prompt preview with copy button in the given container.
- * @param {string} text - The prompt text to display
- * @param {HTMLElement} previewEl - Container element (e.g. promptPreview div)
- */
 function showPromptPreview(text, previewEl) {
   previewEl.classList.remove("hidden");
   previewEl.innerHTML = `
@@ -1828,9 +2387,6 @@ function showPromptPreview(text, previewEl) {
     });
 }
 
-/**
- * Copy text to clipboard and show a toast.
- */
 async function copyToClipboard(text, message) {
   try {
     await navigator.clipboard.writeText(text);
@@ -1850,13 +2406,14 @@ async function showSprintDossier(sprintId) {
   pushRoute(`/dossier/${sprintId}`);
   content.classList.add("dossier-view");
   content.innerHTML = `
-    <div class="detail-main">
-      <div class="overlay-header">
-        <h2>Sprint Dossier</h2>
-        <button class="overlay-close" onclick="closeDetailOverlay()">&times;</button>
+    <div class="slide-header">
+      <span class="slide-id">${escText(sprintId)}</span>
+      <span class="slide-typechip" style="color:#7b83eb;background:rgba(123,131,235,.12)">Dossier</span>
+      <div class="slide-actions">
+        <button class="slide-close" onclick="closeDetailOverlay()">&times;</button>
       </div>
-      <div style="padding:20px 0;color:var(--text-muted)">Generating...</div>
     </div>
+    <div class="slide-body"><div style="padding:20px 0;color:var(--text-3)">Generating…</div></div>
   `;
   overlay.classList.remove("hidden");
 
@@ -1867,16 +2424,15 @@ async function showSprintDossier(sprintId) {
     const dossierText = result.dossier || "(empty dossier)";
 
     content.innerHTML = `
-      <div class="detail-main">
-        <div class="overlay-header">
-          <h2>Sprint Dossier</h2>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <button class="btn btn-primary btn-sm" id="dossierCopyBtn">Copy to Clipboard</button>
-            <button class="overlay-close" id="dossierCloseBtn">&times;</button>
-          </div>
+      <div class="slide-header">
+        <span class="slide-id">${escText(sprintId)}</span>
+        <span class="slide-typechip" style="color:#7b83eb;background:rgba(123,131,235,.12)">Dossier</span>
+        <div class="slide-actions">
+          <button class="btn btn-ghost btn-sm" id="dossierCopyBtn">Copy</button>
+          <button class="slide-close" id="dossierCloseBtn">&times;</button>
         </div>
-        <div class="detail-body">${mdToHtml(dossierText)}</div>
       </div>
+      <div class="slide-body"><div class="detail-body">${mdToHtml(dossierText)}</div></div>
     `;
 
     document.getElementById("dossierCopyBtn").addEventListener("click", () => {
@@ -1885,12 +2441,13 @@ async function showSprintDossier(sprintId) {
     document
       .getElementById("dossierCloseBtn")
       .addEventListener("click", closeDetailOverlay);
+    wireEntityRefs(content);
   } catch (err) {
     content.innerHTML = `<div style="padding:40px;color:var(--danger)">Error: ${escText(err.message)}</div>`;
   }
 }
 
-// ─────────────────────────────────────────────────────────── Detail overlay (items)
+// ─────────────────────────────────────────────────────────── Slide-over detail (items)
 
 function showDetailOverlay(itemId) {
   const item = state.items.find((i) => i.id === itemId);
@@ -1902,13 +2459,16 @@ function showDetailOverlay(itemId) {
 
   pushRoute(`/item/${itemId}`);
 
-  // Stage dropdown options
+  const kind = ticketKind(item);
+  const isDecision = item.type === "decision";
+  const chipColor = isDecision ? "#52a9ff" : kind ? kindColor(kind) : "#9b9fad";
+  const chipLabel = isDecision ? "Decision" : kind || item.type || "ticket";
+
   const stageOptions = STAGES_FOR_ITEMS.map(
     (s) =>
       `<option value="${s}"${item.stage === s ? " selected" : ""}>${s}</option>`,
   ).join("");
 
-  // Priority dropdown options
   const priorityOptions = ["", ...PRIORITIES]
     .map(
       (p) =>
@@ -1916,74 +2476,66 @@ function showDetailOverlay(itemId) {
     )
     .join("");
 
-  // Type badge
-  const typeBadge = item.type
-    ? `<span class="badge badge-type">${escText(item.type)}</span>`
-    : "";
-
-  // Body rendered as HTML
   const bodyHTML = item.body
     ? mdToHtml(item.body)
-    : '<p style="color:var(--text-muted)">No description</p>';
+    : '<p style="color:var(--text-3)">No description</p>';
 
-  // Affected files
   const filesHTML =
     (item.affectedFiles || []).length > 0
       ? `<ul class="file-list">${item.affectedFiles.map((f) => `<li>${escText(f)}</li>`).join("")}</ul>`
-      : '<span style="color:var(--text-muted)">None</span>';
+      : "";
 
-  // Related items
-  const relatedItems = (item.related || [])
-    .map((rid) => state.items.find((i) => i.id === rid))
-    .filter(Boolean);
-  const relatedHTML =
-    relatedItems.length > 0
-      ? relatedItems
-          .map(
-            (r) => `
-        <div class="related-item" data-id="${escAttr(r.id)}">
-          <span class="item-id">${escText(r.id)}</span>
-          <span>${escText(r.title)}</span>
-        </div>
-      `,
-          )
-          .join("")
-      : '<span style="color:var(--text-muted)">None</span>';
+  const byId = itemsById();
+  const blockers = Array.isArray(item.blockedBy) ? item.blockedBy : [];
+  const blockersHTML = blockers.length
+    ? `<div class="slide-chips-row"><span class="slide-chips-label">waits on</span>${blockers
+        .map((id) => {
+          const b = byId.get(id);
+          const c = kindColor(ticketKind(b));
+          const done = !b || isResolvedStage(b.stage);
+          return `<span class="pcard-waitchip${done ? " waitchip-done" : ""}" style="color:${done ? "#62667a" : c};background:${done ? "transparent" : c + "14"}" data-ref="${escAttr(id)}">${escText(id)}${done ? " ✓" : ""}</span>`;
+        })
+        .join("")}</div>`
+    : "";
 
-  // Exploration prompt button (only for items in exploring stage)
+  const relatedItems = (item.related || []);
+  const relatedHTML = relatedItems.length
+    ? `<div class="slide-chips-row"><span class="slide-chips-label">related</span>${relatedItems
+        .map((rid) => `<span class="slide-refchip" data-ref="${escAttr(rid)}">${escText(rid)}</span>`)
+        .join("")}</div>`
+    : "";
+
   const explorationBtn =
     item.stage === "exploring"
-      ? '<button class="btn btn-primary btn-sm" id="explorePromptBtn">Generate Exploration Prompt</button>'
+      ? '<button class="btn btn-ghost btn-sm" id="explorePromptBtn">Exploration prompt</button>'
       : "";
 
   content.innerHTML = `
-    <div class="detail-main">
-      <button class="detail-back" id="detailBack">&larr; Back</button>
-      <div class="detail-id">${escText(item.id)}${item.updatedAt ? `<span class="detail-updated" title="${escAttr(new Date(item.updatedAt).toLocaleString())}">updated ${relativeTime(item.updatedAt)}</span>` : ""}</div>
+    <div class="slide-header">
+      <span class="slide-id" style="color:${chipColor}">${escText(item.id)}</span>
+      <span class="slide-typechip" style="color:${chipColor};background:${chipColor}1f">${escText(chipLabel)}</span>
+      <span class="slide-updated">updated ${relativeTime(item.updatedAt)}</span>
+      <div class="slide-actions">
+        <button class="btn btn-ghost btn-sm" id="generatePromptBtn">/prompt</button>
+        ${explorationBtn}
+        <button class="btn btn-ghost btn-sm btn-danger-ghost" id="archiveBtn">Archive</button>
+        <button class="slide-close" id="detailBack">&times;</button>
+      </div>
+    </div>
+    <div class="slide-body">
       <div class="detail-title">
         <input type="text" id="detailTitleInput" value="${escAttr(item.title)}" />
       </div>
       <div class="detail-meta">
-        <div class="meta-item">
-          <span>Stage:</span>
-          <select id="detailStageSelect">${stageOptions}</select>
-        </div>
-        <div class="meta-item">
-          <span>Priority:</span>
-          <select id="detailPrioritySelect">${priorityOptions}</select>
-        </div>
-        <div class="meta-item">
-          <span>Sprint:</span>
-          <select id="detailSprintSelect">${buildSprintOptions(item.sprintId)}</select>
-        </div>
-        <div class="meta-item">${typeBadge}</div>
-        ${parsePillars(item.pillar)
-          .map((p) => `<span class="badge badge-pillar">${escText(p)}</span>`)
-          .join("")}
+        <label class="meta-item"><span>Stage</span><select id="detailStageSelect">${stageOptions}</select></label>
+        <label class="meta-item"><span>Priority</span><select id="detailPrioritySelect">${priorityOptions}</select></label>
+        <label class="meta-item"><span>Project</span><select id="detailSprintSelect">${buildSprintOptions(item.sprintId)}</select></label>
       </div>
+      ${blockersHTML}
+      ${relatedHTML}
       <div class="detail-body-wrapper">
         <div class="detail-body-toolbar">
-          <button class="btn btn-secondary btn-sm" id="editBodyBtn">Edit</button>
+          <button class="btn btn-ghost btn-sm" id="editBodyBtn">Edit</button>
         </div>
         <div class="detail-body" id="detailBody">${bodyHTML}</div>
         <div class="detail-body-edit hidden" id="detailBodyEdit">
@@ -1994,46 +2546,36 @@ function showDetailOverlay(itemId) {
           </div>
         </div>
       </div>
-      ${item.type === "decision" ? renderTestsWidget(item.tests) : ""}
-      <div class="detail-section">
-        <div class="detail-section-title">Affected Files</div>
-        ${filesHTML}
-      </div>
-      <div class="detail-section">
-        <div class="detail-section-title">Related Items</div>
-        <div id="detailRelated">${relatedHTML}</div>
-      </div>
+      ${isDecision ? renderTestsWidget(item.tests) : ""}
+      ${filesHTML ? `<div class="detail-section"><div class="detail-section-title">Affected files</div>${filesHTML}</div>` : ""}
+      <div class="prompt-preview hidden" id="promptPreview"></div>
     </div>
-    <div class="detail-sidebar">
-      <div id="commentThread"></div>
-      <div class="sidebar-actions">
-        <button class="btn btn-primary btn-sm" id="generatePromptBtn">Generate Prompt</button>
-        ${explorationBtn}
-        <div class="prompt-preview hidden" id="promptPreview"></div>
-        <button class="btn btn-danger btn-sm" id="archiveBtn">Archive</button>
-      </div>
-    </div>
+    <div class="slide-thread" id="commentThread"></div>
   `;
 
-  // Render comment thread via shared helper
   renderComments(
     item.comments || [],
     "items",
     item.id,
     document.getElementById("commentThread"),
-    () => showDetailOverlay(item.id),
+    async () => {
+      try {
+        const updated = await apiFetch(`/api/items/${item.id}`);
+        upsertInState("item", item.id, updated);
+      } catch { /* fall through */ }
+      showDetailOverlay(item.id);
+    },
   );
 
   overlay.classList.remove("hidden");
+  wireEntityRefs(document.getElementById("detailBody"));
 
-  // ── Wire overlay events
+  // ── Wire slide-over events
 
-  // Back button
   document
     .getElementById("detailBack")
     .addEventListener("click", () => closeDetailOverlay());
 
-  // Title edit on blur
   const titleInput = document.getElementById("detailTitleInput");
   const originalTitle = item.title;
   titleInput.addEventListener("blur", async () => {
@@ -2046,12 +2588,11 @@ function showDetailOverlay(itemId) {
         });
         showToast("Title updated");
       } catch (err) {
-        /* toasted by apiFetch */
+        /* toasted */
       }
     }
   });
 
-  // Body edit toggle
   const bodyDisplay = document.getElementById("detailBody");
   const bodyEditWrap = document.getElementById("detailBodyEdit");
   const bodyTextarea = document.getElementById("detailBodyTextarea");
@@ -2086,10 +2627,8 @@ function showDetailOverlay(itemId) {
     }
   });
 
-  // Image upload on body edit textarea
   initImageUpload(bodyTextarea);
 
-  // Stage change
   document
     .getElementById("detailStageSelect")
     .addEventListener("change", async (e) => {
@@ -2104,7 +2643,6 @@ function showDetailOverlay(itemId) {
       }
     });
 
-  // Priority change
   document
     .getElementById("detailPrioritySelect")
     .addEventListener("change", async (e) => {
@@ -2119,7 +2657,6 @@ function showDetailOverlay(itemId) {
       }
     });
 
-  // Sprint change
   document
     .getElementById("detailSprintSelect")
     .addEventListener("change", async (e) => {
@@ -2128,18 +2665,16 @@ function showDetailOverlay(itemId) {
           method: "PATCH",
           body: JSON.stringify({ sprintId: e.target.value || null }),
         });
-        showToast(e.target.value ? `Moved to ${e.target.value}` : "Removed from sprint");
+        showToast(e.target.value ? `Moved to ${e.target.value}` : "Removed from project");
       } catch (err) {
         /* toasted */
       }
     });
 
-  // Related item clicks
-  content.querySelectorAll(".related-item[data-id]").forEach((el) => {
-    el.addEventListener("click", () => showDetailOverlay(el.dataset.id));
+  content.querySelectorAll("[data-ref]").forEach((el) => {
+    el.addEventListener("click", () => openEntityById(el.dataset.ref));
   });
 
-  // Generate prompt
   document.getElementById("generatePromptBtn").addEventListener("click", () => {
     generateAndShowPrompt(
       { entityType: "item", entityId: item.id, includeQmd: true },
@@ -2147,7 +2682,6 @@ function showDetailOverlay(itemId) {
     );
   });
 
-  // Generate exploration prompt (items in exploring stage)
   const exploreBtn = document.getElementById("explorePromptBtn");
   if (exploreBtn) {
     exploreBtn.addEventListener("click", () => {
@@ -2180,13 +2714,13 @@ function showDetailOverlay(itemId) {
     });
   }
 
-  // Archive button — moves item to archive.json
   document.getElementById("archiveBtn").addEventListener("click", async () => {
     try {
       await apiFetch("/api/items/archive", {
         method: "POST",
         body: JSON.stringify({ ids: [item.id] }),
       });
+      state.archived = null; // invalidate cache
       closeDetailOverlay();
       showToast(`${item.id} archived`);
     } catch (err) {
@@ -2204,7 +2738,7 @@ function closeDetailOverlay() {
   if (wasOpen) pushRoute(currentBoardPath());
 }
 
-// ─────────────────────────────────────────────────────────── SDD Detail overlay
+// ─────────────────────────────────────────────────────────── SDD slide-over
 
 function showSddDetail(sddId) {
   const sdd = state.designs.find((d) => d.id === sddId);
@@ -2217,77 +2751,106 @@ function showSddDetail(sddId) {
 
   const bodyHTML = sdd.body
     ? mdToHtml(sdd.body)
-    : '<p style="color:var(--text-muted)">No description</p>';
+    : '<p style="color:var(--text-3)">No description</p>';
 
-  // Linked items
+  // Linked tickets rendered as a checklist (map document style)
   const linkedItemIds = sdd.linkedItems || sdd.itemIds || [];
+  const byId = itemsById();
   const linkedEntities = linkedItemIds
-    .map((lid) => state.items.find((i) => i.id === lid))
+    .map((lid) => byId.get(lid))
     .filter(Boolean);
-  const linkedHTML =
-    linkedEntities.length > 0
-      ? linkedEntities
-          .map(
-            (r) => `
-        <div class="related-item" data-id="${escAttr(r.id)}" data-type="item">
-          <span class="item-id">${escText(r.id)}</span>
-          <span>${escText(r.title)}</span>
-        </div>
-      `,
-          )
-          .join("")
-      : '<span style="color:var(--text-muted)">No linked items</span>';
+  const { frontier } = splitByFrontier(linkedEntities);
+  const frontierIds = new Set(frontier.map((t) => t.id));
+
+  const linkedHTML = linkedEntities.length
+    ? `<div class="map-tickets">${linkedEntities
+        .map((t) => {
+          const kind = ticketKind(t);
+          const color = kindColor(kind);
+          const done = isResolvedStage(t.stage);
+          const onFrontier = frontierIds.has(t.id);
+          const blockers = unresolvedBlockers(t, byId);
+          const statusIcon = done
+            ? '<span class="mt-check">✓</span>'
+            : onFrontier
+              ? `<span class="mt-ring" style="border-color:${color}"></span>`
+              : '<span class="mt-ring mt-ring-fog"></span>';
+          const tail = done
+            ? ""
+            : onFrontier
+              ? `<span class="mt-frontier" style="color:${color}">FRONTIER</span>`
+              : blockers.length
+                ? `<span class="mt-waits">⊘ ${blockers.map((b) => escText(b.replace(/^[A-Z]+-/, ""))).join(" · ")}</span>`
+                : "";
+          return `
+          <div class="mt-row${done ? " mt-done" : ""}${onFrontier ? " mt-hot" : ""}" data-ref="${escAttr(t.id)}"${onFrontier ? ` style="background:${color}0a"` : ""}>
+            ${statusIcon}
+            <span class="mt-id" style="color:${color}">${escText(t.id)}</span>
+            <span class="mt-title">${escText(displayTitle(t))}</span>
+            ${tail}
+          </div>`;
+        })
+        .join("")}</div>`
+    : '<span style="color:var(--text-3)">No linked tickets</span>';
+
+  const resolvedCount = linkedEntities.filter((t) => isResolvedStage(t.stage)).length;
 
   content.innerHTML = `
-    <div class="detail-main">
-      <button class="detail-back" id="detailBack">&larr; Back</button>
-      <div class="detail-id"><span class="badge badge-type">SDD</span> ${escText(sdd.id)}${sdd.updatedAt ? `<span class="detail-updated" title="${escAttr(new Date(sdd.updatedAt).toLocaleString())}">updated ${relativeTime(sdd.updatedAt)}</span>` : ""}</div>
+    <div class="slide-header">
+      <span class="slide-id" style="color:#7b83eb">${escText(sdd.id)}</span>
+      <span class="slide-typechip" style="color:#7b83eb;background:rgba(123,131,235,.12)">Map</span>
+      <span class="slide-updated">updated ${relativeTime(sdd.updatedAt)}</span>
+      <div class="slide-actions">
+        <button class="btn btn-ghost btn-sm" id="generatePromptBtn">/prompt</button>
+        <button class="btn btn-ghost btn-sm" id="reviewPromptBtn">/review</button>
+        <button class="btn btn-ghost btn-sm" id="createPlanBtn">/plan</button>
+        <button class="btn btn-ghost btn-sm" id="generateSddPromptBtn">SDD prompt</button>
+        ${sdd.body ? '<button class="btn btn-ghost btn-sm" id="graduateDdBtn">Graduate → DD</button>' : ""}
+        <button class="slide-close" id="detailBack">&times;</button>
+      </div>
+    </div>
+    <div class="slide-body">
       <div class="detail-title">
         <input type="text" id="detailTitleInput" value="${escAttr(sdd.title || sdd.name || "")}" />
       </div>
       <div class="detail-meta">
-        <div class="meta-item">
-          <span>Sprint:</span>
-          <select id="detailSprintSelect">${buildSprintOptions(sdd.sprintId)}</select>
-        </div>
+        <label class="meta-item"><span>Project</span><select id="detailSprintSelect">${buildSprintOptions(sdd.sprintId)}</select></label>
       </div>
+      ${linkedEntities.length ? `
+      <div class="map-section-head">
+        <span class="map-section-dot" style="background:#f0883e"></span>
+        <span class="map-section-title">Tickets</span>
+        <span class="map-section-count">${linkedEntities.length} · ${resolvedCount} resolved</span>
+      </div>
+      ${linkedHTML}` : ""}
       <div class="detail-body">${bodyHTML}</div>
       ${renderTestsWidget(sdd.tests)}
-      <div class="detail-section">
-        <div class="detail-section-title">Linked Items</div>
-        <div id="detailLinked">${linkedHTML}</div>
-      </div>
+      <div class="prompt-preview hidden" id="promptPreview"></div>
     </div>
-    <div class="detail-sidebar">
-      <div id="commentThread"></div>
-      <div class="sidebar-actions">
-        <button class="btn btn-primary btn-sm" id="generatePromptBtn">Generate Prompt</button>
-        <button class="btn btn-primary btn-sm" id="generateSddPromptBtn">Generate SDD Prompt</button>
-        <button class="btn btn-secondary btn-sm" id="reviewPromptBtn">Review Prompt</button>
-        <button class="btn btn-primary btn-sm" id="createPlanBtn">Create Plan</button>
-        ${sdd.body ? '<button class="btn btn-accent btn-sm" id="graduateDdBtn">Graduate to DD</button>' : ""}
-        <div class="prompt-preview hidden" id="promptPreview"></div>
-      </div>
-    </div>
+    <div class="slide-thread" id="commentThread"></div>
   `;
 
   overlay.classList.remove("hidden");
+  wireEntityRefs(content.querySelector(".detail-body"));
 
-  // Render comment thread
   renderComments(
     sdd.comments || [],
     "designs",
     sdd.id,
     document.getElementById("commentThread"),
-    () => showSddDetail(sdd.id),
+    async () => {
+      try {
+        const updated = await apiFetch(`/api/designs/${sdd.id}`);
+        upsertInState("design", sdd.id, updated);
+      } catch { /* fall through */ }
+      showSddDetail(sdd.id);
+    },
   );
 
-  // Back button
   document
     .getElementById("detailBack")
     .addEventListener("click", () => closeDetailOverlay());
 
-  // Title edit on blur
   const titleInput = document.getElementById("detailTitleInput");
   const originalTitle = sdd.title || sdd.name || "";
   titleInput.addEventListener("blur", async () => {
@@ -2305,7 +2868,6 @@ function showSddDetail(sddId) {
     }
   });
 
-  // Sprint change
   document
     .getElementById("detailSprintSelect")
     .addEventListener("change", async (e) => {
@@ -2314,21 +2876,16 @@ function showSddDetail(sddId) {
           method: "PATCH",
           body: JSON.stringify({ sprintId: e.target.value || null }),
         });
-        showToast(e.target.value ? `Moved to ${e.target.value}` : "Removed from sprint");
+        showToast(e.target.value ? `Moved to ${e.target.value}` : "Removed from project");
       } catch (err) {
         /* toasted */
       }
     });
 
-  // Linked item clicks → navigate to item detail
-  content.querySelectorAll(".related-item[data-id]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const type = el.dataset.type;
-      if (type === "item") showDetailOverlay(el.dataset.id);
-    });
+  content.querySelectorAll(".mt-row[data-ref]").forEach((el) => {
+    el.addEventListener("click", () => showDetailOverlay(el.dataset.ref));
   });
 
-  // Generate Prompt
   document.getElementById("generatePromptBtn").addEventListener("click", () => {
     generateAndShowPrompt(
       { entityType: "sdd", entityId: sdd.id, includeQmd: true },
@@ -2336,7 +2893,6 @@ function showSddDetail(sddId) {
     );
   });
 
-  // Generate SDD Prompt (template for writing an SDD from linked items)
   document
     .getElementById("generateSddPromptBtn")
     .addEventListener("click", () => {
@@ -2370,7 +2926,6 @@ function showSddDetail(sddId) {
       showPromptPreview(prompt, document.getElementById("promptPreview"));
     });
 
-  // Review Prompt (critical review of SDD)
   document.getElementById("reviewPromptBtn").addEventListener("click", () => {
     generateAndShowReviewPrompt(
       { entityType: "sdd", entityId: sdd.id },
@@ -2378,31 +2933,18 @@ function showSddDetail(sddId) {
     );
   });
 
-  // Create Plan (copies a plan creation prompt to clipboard)
   document.getElementById("createPlanBtn").addEventListener("click", () => {
-    // Find sprint context
-    const activeSprint = state.sprints?.find(
-      (s) => s.status === "active",
-    );
-    const linkedItemIds = sdd.linkedItems || sdd.itemIds || [];
-
+    const activeSprint = state.sprints?.find((s) => s.status === "active");
     const lines = [`/plan ${sdd.id}`];
-
-    // Add sprint context if relevant
     if (activeSprint) {
       lines.push("", `Sprint: ${activeSprint.id} — ${activeSprint.title || activeSprint.problem || ""}`);
     }
-
-    // Add linked items as context for the planner
     if (linkedItemIds.length > 0) {
       lines.push("", `Linked items: ${linkedItemIds.join(", ")}`);
     }
-
-    const prompt = lines.join("\n");
-    showPromptPreview(prompt, document.getElementById("promptPreview"));
+    showPromptPreview(lines.join("\n"), document.getElementById("promptPreview"));
   });
 
-  // Graduate to DD
   const graduateBtn = document.getElementById("graduateDdBtn");
   if (graduateBtn) {
     graduateBtn.addEventListener("click", () => {
@@ -2417,15 +2959,6 @@ function showSddDetail(sddId) {
           <div class="form-row">
             <label>Title *</label>
             <input type="text" name="title" required value="${escAttr(sdd.title || sdd.name || "")}">
-          </div>
-          <div class="form-row">
-            <label>Pillar</label>
-            <select name="pillar">
-              <option value="">--</option>
-              ${["Satisfying Growth", "Nudging creates tension", "Reproducibility", "Tooling"]
-                .map((p) => `<option value="${escAttr(p)}">${escText(p)}</option>`)
-                .join("")}
-            </select>
           </div>
           <div class="form-row">
             <label>Body</label>
@@ -2452,7 +2985,6 @@ function showSddDetail(sddId) {
               type: "decision",
               title: fd.get("title"),
               body: fd.get("body"),
-              pillar: fd.get("pillar") || undefined,
             }),
           });
           await apiFetch(`/api/designs/${sdd.id}`, {
@@ -2470,7 +3002,7 @@ function showSddDetail(sddId) {
   }
 }
 
-// ─────────────────────────────────────────────────────────── Plan Detail overlay
+// ─────────────────────────────────────────────────────────── Plan slide-over
 
 async function showPlanDetail(planId) {
   const plan = state.plans.find((p) => p.id === planId);
@@ -2481,14 +3013,12 @@ async function showPlanDetail(planId) {
   const content = document.getElementById("detailContent");
   if (!overlay || !content) return;
 
-  // Fetch ralph status for this plan
   let ralphStatus = null;
   try {
-    const loops = await apiFetch("/api/ralph");
+    const loops = await fetchRalphLoops();
     ralphStatus = loops.find((l) => l.planId === planId) || null;
   } catch { /* ralph API unavailable */ }
 
-  // Context info
   const ctx = plan.context || {};
   let contextHTML = "";
   if (ctx.setupNotes || ctx.relevantFiles || ctx.designDecisions) {
@@ -2504,20 +3034,19 @@ async function showPlanDetail(planId) {
       );
     }
     if (ctx.designDecisions) {
-      const ddText = Array.isArray(ctx.designDecisions) ? ctx.designDecisions.join("\n") : ctx.designDecisions;
+      const ddText = Array.isArray(ctx.designDecisions) ? ctx.designDecisions.map((d) => `- ${d}`).join("\n") : ctx.designDecisions;
       parts.push(
         `<div class="context-block"><strong>Design Decisions:</strong><div>${mdToHtml(ddText)}</div></div>`,
       );
     }
     contextHTML = `
-      <div class="detail-section">
-        <div class="detail-section-title">Context</div>
+      <details class="detail-section plan-context">
+        <summary class="detail-section-title">Context</summary>
         ${parts.join("")}
-      </div>
+      </details>
     `;
   }
 
-  // Task list
   const tasks = plan.tasks || [];
   const taskListHTML =
     tasks.length > 0
@@ -2528,10 +3057,9 @@ async function showPlanDetail(planId) {
             const blockedBy = (task.blockedBy || []).filter((b) => b);
             const blockedHTML =
               blockedBy.length > 0
-                ? `<span class="task-blocked">Blocked by: ${blockedBy.map((b) => escText(b)).join(", ")}</span>`
+                ? `<span class="task-blocked">⊘ ${blockedBy.map((b) => escText(b)).join(", ")}</span>`
                 : "";
 
-            // Expanded details (hidden by default)
             const stepsHTML =
               (task.steps || []).length > 0
                 ? `<ol class="task-steps">${task.steps.map((s) => `<li>${escText(s)}</li>`).join("")}</ol>`
@@ -2541,7 +3069,7 @@ async function showPlanDetail(planId) {
               : "";
             const progressHTML =
               (task.progressNotes || []).length > 0
-                ? `<div class="task-progress-notes"><strong>Progress:</strong><ul>${task.progressNotes.map((n) => `<li>${escText(typeof n === "string" ? n : n.text || "")}${n.timestamp ? ` <span style="color:var(--text-muted);font-size:11px">${new Date(n.timestamp).toLocaleString()}</span>` : ""}</li>`).join("")}</ul></div>`
+                ? `<div class="task-progress-notes"><strong>Progress:</strong><ul>${task.progressNotes.map((n) => `<li>${escText(typeof n === "string" ? n : n.text || "")}${n.timestamp ? ` <span style="color:var(--text-3);font-size:11px">${new Date(n.timestamp).toLocaleString()}</span>` : ""}</li>`).join("")}</ul></div>`
                 : "";
 
             return `
@@ -2549,7 +3077,7 @@ async function showPlanDetail(planId) {
             <div class="task-header">
               <input type="checkbox" class="task-checkbox" data-task-idx="${idx}" ${checkedAttr} />
               <span class="task-title">${escText(task.title || `Task ${idx + 1}`)}</span>
-              <span class="badge ${statusClass}">${escText(task.status || "pending")}</span>
+              <span class="task-status ${statusClass}">${escText(task.status || "pending")}</span>
               ${blockedHTML}
             </div>
             <div class="task-details hidden">
@@ -2562,69 +3090,64 @@ async function showPlanDetail(planId) {
         `;
           })
           .join("")
-      : '<span style="color:var(--text-muted)">No tasks</span>';
+      : '<span style="color:var(--text-3)">No tasks</span>';
+
+  const doneCount = tasks.filter((t) => t.status === "done").length;
+  const ralphHTML = ralphStatus && ralphStatus.alive
+    ? `<span class="ralph-live"><span class="ralph-dot"></span>Ralph live${ralphStatus.iteration ? ` · iter ${ralphStatus.iteration}` : ""}${ralphStatus.stopping ? " · stopping…" : ""}</span>
+       <button class="btn btn-ghost btn-sm btn-danger-ghost" id="ralphStopBtn" ${ralphStatus.stopping ? "disabled" : ""}>${ralphStatus.stopping ? "Stopping…" : "Stop"}</button>`
+    : ralphStatus && !ralphStatus.alive && ralphStatus.pid !== null
+      ? `<span class="ralph-idle">worktree: ralph/${escText(plan.id)}</span>`
+      : "";
 
   content.innerHTML = `
-    <div class="detail-main">
-      <button class="detail-back" id="detailBack">&larr; Back</button>
-      <div class="detail-id"><span class="badge badge-type">Plan</span> ${escText(plan.id)}${plan.updatedAt ? `<span class="detail-updated" title="${escAttr(new Date(plan.updatedAt).toLocaleString())}">updated ${relativeTime(plan.updatedAt)}</span>` : ""}</div>
-      <div class="detail-title">
-        <span class="detail-title-text">${escText(plan.title || plan.name || "(untitled)")}</span>
+    <div class="slide-header">
+      <span class="slide-id" style="color:#46c288">${escText(plan.id)}</span>
+      <span class="slide-typechip" style="color:#46c288;background:rgba(70,194,136,.12)">Plan</span>
+      <span class="slide-updated">updated ${relativeTime(plan.updatedAt)}</span>
+      ${ralphHTML}
+      <div class="slide-actions">
+        <button class="btn btn-ghost btn-sm" id="generatePromptBtn">/prompt</button>
+        <button class="btn btn-ghost btn-sm" id="reviewPromptBtn">/review</button>
+        <button class="btn btn-ghost btn-sm" id="exportRalphBtn">/ralph</button>
+        <button class="slide-close" id="detailBack">&times;</button>
       </div>
+    </div>
+    <div class="slide-body">
+      <h1 class="slide-doc-title">${escText(displayTitle(plan))}</h1>
       <div class="detail-meta">
-        <div class="meta-item">
-          <span>Sprint:</span>
-          <select id="detailSprintSelect">${buildSprintOptions(plan.sprintId)}</select>
-        </div>
+        <label class="meta-item"><span>Project</span><select id="detailSprintSelect">${buildSprintOptions(plan.sprintId)}</select></label>
       </div>
       ${contextHTML}
       <div class="detail-section">
-        <div class="detail-section-title">Tasks (${tasks.filter((t) => t.status === "done").length}/${tasks.length})</div>
+        <div class="detail-section-title">Tasks (${doneCount}/${tasks.length})</div>
         <div class="task-list" id="planTaskList">${taskListHTML}</div>
       </div>
+      <div class="prompt-preview hidden" id="promptPreview"></div>
     </div>
-    <div class="detail-sidebar">
-      <div id="commentThread"></div>
-      <div class="sidebar-actions">
-        ${ralphStatus && ralphStatus.alive ? `
-          <div class="ralph-status ralph-running">
-            <span class="ralph-dot"></span>
-            Ralph running${ralphStatus.iteration ? ` (iteration ${ralphStatus.iteration})` : ""}
-            ${ralphStatus.stopping ? " — stopping..." : ""}
-          </div>
-          <button class="btn btn-danger btn-sm" id="ralphStopBtn" ${ralphStatus.stopping ? "disabled" : ""}>
-            ${ralphStatus.stopping ? "Stopping..." : "Stop Ralph"}
-          </button>
-        ` : ralphStatus && !ralphStatus.alive && ralphStatus.pid !== null ? `
-          <div class="ralph-status ralph-stopped">
-            Worktree exists (branch: ralph/${escText(plan.id)})
-          </div>
-        ` : ""}
-        <button class="btn btn-primary btn-sm" id="generatePromptBtn">Generate Prompt</button>
-        <button class="btn btn-secondary btn-sm" id="reviewPromptBtn">Review Prompt</button>
-        <button class="btn btn-primary btn-sm" id="exportRalphBtn">Copy Ralph Command</button>
-        <div class="prompt-preview hidden" id="promptPreview"></div>
-      </div>
-    </div>
+    <div class="slide-thread" id="commentThread"></div>
   `;
 
   overlay.classList.remove("hidden");
 
-  // Render comment thread
   renderComments(
     plan.comments || [],
     "plans",
     plan.id,
     document.getElementById("commentThread"),
-    () => showPlanDetail(plan.id),
+    async () => {
+      try {
+        const updated = await apiFetch(`/api/plans/${plan.id}`);
+        upsertInState("plan", plan.id, updated);
+      } catch { /* fall through */ }
+      showPlanDetail(plan.id);
+    },
   );
 
-  // Back button
   document
     .getElementById("detailBack")
     .addEventListener("click", () => closeDetailOverlay());
 
-  // Sprint change
   document
     .getElementById("detailSprintSelect")
     .addEventListener("change", async (e) => {
@@ -2633,24 +3156,21 @@ async function showPlanDetail(planId) {
           method: "PATCH",
           body: JSON.stringify({ sprintId: e.target.value || null }),
         });
-        showToast(e.target.value ? `Moved to ${e.target.value}` : "Removed from sprint");
+        showToast(e.target.value ? `Moved to ${e.target.value}` : "Removed from project");
       } catch (err) {
         /* toasted */
       }
     });
 
-  // Task item click → toggle expanded
   content.querySelectorAll(".task-item").forEach((taskEl) => {
     const header = taskEl.querySelector(".task-header");
     const details = taskEl.querySelector(".task-details");
     header.addEventListener("click", (e) => {
-      // Don't toggle when clicking checkbox
       if (e.target.classList.contains("task-checkbox")) return;
       details.classList.toggle("hidden");
     });
   });
 
-  // Task checkbox → mark done
   content.querySelectorAll(".task-checkbox").forEach((checkbox) => {
     checkbox.addEventListener("change", async (e) => {
       const idx = parseInt(e.target.dataset.taskIdx, 10);
@@ -2664,7 +3184,6 @@ async function showPlanDetail(planId) {
           method: "PATCH",
           body: JSON.stringify({ passes: newPasses, status: newStatus }),
         });
-        // Update task in local state so overlay re-renders with fresh data
         const localPlan = state.plans.find(p => p.id === plan.id);
         if (localPlan) {
           const localTask = localPlan.tasks.find(t => t.id === taskId);
@@ -2678,7 +3197,6 @@ async function showPlanDetail(planId) {
     });
   });
 
-  // Generate Prompt
   document.getElementById("generatePromptBtn").addEventListener("click", () => {
     generateAndShowPrompt(
       { entityType: "plan", entityId: plan.id, includeQmd: true },
@@ -2686,7 +3204,6 @@ async function showPlanDetail(planId) {
     );
   });
 
-  // Review Prompt (critical review of plan)
   document.getElementById("reviewPromptBtn").addEventListener("click", () => {
     generateAndShowReviewPrompt(
       { entityType: "plan", entityId: plan.id },
@@ -2694,13 +3211,11 @@ async function showPlanDetail(planId) {
     );
   });
 
-  // Export for Ralph — copy the ralph.sh command for this plan
   document.getElementById("exportRalphBtn").addEventListener("click", () => {
     const cmd = `./ralph.sh 10 ${plan.id}`;
     copyToClipboard(cmd, "Ralph command copied!");
   });
 
-  // Ralph stop button
   const ralphStopBtn = document.getElementById("ralphStopBtn");
   if (ralphStopBtn) {
     ralphStopBtn.addEventListener("click", async () => {
@@ -2708,7 +3223,7 @@ async function showPlanDetail(planId) {
         await apiFetch(`/api/ralph/${plan.id}/stop`, { method: "POST" });
         showToast("Stop signal sent to Ralph");
         ralphStopBtn.disabled = true;
-        ralphStopBtn.textContent = "Stopping...";
+        ralphStopBtn.textContent = "Stopping…";
       } catch (err) {
         showToast("Failed to stop Ralph", "error");
       }
@@ -2723,9 +3238,7 @@ function openNewItemModal(stage) {
   if (backdrop) backdrop.classList.remove("hidden");
   const form = document.getElementById("newItemForm");
   if (form) form.reset();
-  // Store target stage for the submit handler
   state._newItemStage = stage || "inbox";
-  // Populate pillar select with normalized unique pillars
   const pillarSelect = document.getElementById("fieldPillar");
   if (pillarSelect) {
     const pillars = allUniquePillars();
@@ -2735,6 +3248,7 @@ function openNewItemModal(stage) {
         .map((p) => `<option value="${escAttr(p)}">${escText(p)}</option>`)
         .join("");
   }
+  form?.querySelector('[name="title"]')?.focus();
 }
 
 function closeNewItemModal() {
@@ -2761,25 +3275,20 @@ function closeSprintModal() {
 let qoResults = [];
 let qoIndex = 0;
 
-/** All openable entities, ignoring sprint/type/search filters. */
+/** All openable entities, ignoring filters. */
 function quickOpenCandidates() {
   const out = [];
   for (const i of state.items)
-    out.push({ id: i.id, title: i.title || "", kind: "item", label: i.type || "item" });
+    out.push({ id: i.id, title: displayTitle(i), kind: "item", label: ticketKind(i) || i.type || "item" });
   for (const d of state.designs)
-    out.push({ id: d.id, title: d.title || "", kind: "sdd", label: "sdd" });
+    out.push({ id: d.id, title: d.title || "", kind: "sdd", label: "map" });
   for (const p of state.plans)
     out.push({ id: p.id, title: p.title || p.name || "", kind: "plan", label: "plan" });
   for (const s of state.sprints)
-    out.push({ id: s.id, title: s.name || "", kind: "sprint", label: "sprint" });
+    out.push({ id: s.id, title: s.name || "", kind: "sprint", label: "project" });
   return out;
 }
 
-/**
- * Rank candidates against the query. ID matches beat title matches;
- * IDs are compared with separators stripped so "sdd106" and "sdd 106"
- * both hit "SDD-106".
- */
 function quickOpenFilter(query) {
   const cands = quickOpenCandidates();
   if (!query) return cands.slice(0, 20);
@@ -2857,43 +3366,25 @@ function quickOpenEntity(c) {
   closeQuickOpen();
   if (c.kind === "sdd") showSddDetail(c.id);
   else if (c.kind === "plan") showPlanDetail(c.id);
-  else if (c.kind === "sprint") showSprintDossier(c.id);
-  else showDetailOverlay(c.id);
+  else if (c.kind === "sprint") {
+    state.projectMode = "map";
+    setView("project", { projectId: c.id });
+  } else showDetailOverlay(c.id);
 }
 
 // ─────────────────────────────────────────────────────────── Event wiring
 
 function initEvents() {
-  // Search input
-  const searchBox = document.getElementById("searchBox");
-  if (searchBox) {
-    const doSearch = debounce((val) => {
-      state.search = val.trim();
-      if (state.view === "decisions") renderDecisionsView();
-      else renderBoard();
-    }, 200);
-    searchBox.addEventListener("input", (e) => doSearch(e.target.value));
-  }
+  // Sidebar search button → quick open
+  document.getElementById("sidebarSearchBtn")?.addEventListener("click", openQuickOpen);
 
-  // Type filter chips
-  document.querySelectorAll(".type-chip").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      const t = chip.dataset.type;
-      if (state.typeFilter.has(t)) {
-        state.typeFilter.delete(t);
-        chip.classList.remove("active");
-      } else {
-        state.typeFilter.add(t);
-        chip.classList.add("active");
-      }
-      renderBoard();
-    });
+  // New project (sprint) button
+  document.getElementById("newProjectBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openSprintModal();
   });
 
-  // Column add buttons
-  document.querySelectorAll(".col-add-btn").forEach((btn) => {
-    btn.addEventListener("click", () => openNewItemModal(btn.dataset.stage));
-  });
+  // New item modal
   document
     .getElementById("modalClose")
     ?.addEventListener("click", closeNewItemModal);
@@ -2905,21 +3396,24 @@ function initEvents() {
     if (e.target === e.currentTarget) closeNewItemModal();
   });
 
-  // New item form submit
   document
     .getElementById("newItemForm")
     ?.addEventListener("submit", async (e) => {
       e.preventDefault();
       const data = Object.fromEntries(new FormData(e.target).entries());
-      // Clean empty fields
       Object.keys(data).forEach((k) => {
         if (!data[k]) delete data[k];
       });
-      // Use the stage from whichever column's + button was clicked
+      // Kind becomes a [kind] title prefix
+      if (data.kind) {
+        data.title = `[${data.kind}] ${data.title || ""}`.trim();
+        delete data.kind;
+      }
       data.stage = state._newItemStage || "inbox";
-      // Assign to active sprint if one is selected
-      if (state.selectedSprintId) {
-        data.sprintId = state.selectedSprintId;
+      // Assign to the open sprint-project
+      if (state.view === "project") {
+        const p = findProject(state.selectedProjectId);
+        if (p && p.kind === "sprint") data.sprintId = p.id;
       }
       try {
         const created = await apiFetch("/api/items", {
@@ -2933,21 +3427,7 @@ function initEvents() {
       }
     });
 
-  // Image upload on textarea (drag-drop + paste)
   initImageUpload(document.querySelector('#newItemForm textarea[name="body"]'));
-
-  // Sprint button — toggle between start and end sprint
-  document.getElementById("sprintBtn")?.addEventListener("click", () => {
-    if (state.selectedSprintId) {
-      endActiveSprint();
-    } else {
-      openSprintModal();
-    }
-  });
-  // Explore sprint button — generate dossier in overlay
-  document.getElementById("exploreSprintBtn")?.addEventListener("click", () => {
-    if (state.selectedSprintId) showSprintDossier(state.selectedSprintId);
-  });
 
   document
     .getElementById("sprintModalClose")
@@ -2962,7 +3442,6 @@ function initEvents() {
       if (e.target === e.currentTarget) closeSprintModal();
     });
 
-  // Sprint form submit
   document
     .getElementById("sprintForm")
     ?.addEventListener("submit", async (e) => {
@@ -2978,15 +3457,16 @@ function initEvents() {
         });
         closeSprintModal();
         if (created && created.id) {
-          state.selectedSprintId = created.id;
+          state.projectMode = "map";
+          setView("project", { projectId: created.id });
         }
-        showToast("Sprint started");
+        showToast("Project started");
       } catch (err) {
         /* toasted */
       }
     });
 
-  // Click backdrop to close detail overlay
+  // Click backdrop to close detail slide-over
   document.getElementById("detailOverlay")?.addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closeDetailOverlay();
   });
@@ -3075,32 +3555,22 @@ function buildKanbanColumns(stages) {
     col.dataset.stage = stage;
     col.innerHTML = `
       <div class="col-header">
+        <span class="col-dot col-dot-${stage}"></span>
         <span class="col-title">${label}</span>
+        <span class="col-count" id="count-${stage}">0</span>
         <div class="col-header-right">
-          ${!isLast ? `<button class="col-add-btn" data-stage="${stage}" title="New item in ${label}">+</button>` : ""}
-          <span class="col-count" id="count-${stage}">0</span>
+          ${!isLast ? `<button class="col-add-btn" data-stage="${stage}" title="New ticket in ${label}">+</button>` : ""}
         </div>
       </div>
       <div class="col-cards" id="cards-${stage}"></div>`;
     board.appendChild(col);
   }
-}
-
-function buildTypeFilters(entityTypes) {
-  const container = document.getElementById("typeFilters");
-  container.innerHTML = "";
-  // Item-level types only (not SDD, PLAN, SPRINT, TASK, MILESTONE)
-  const structuralPrefixes = new Set(["SDD", "PLAN", "SPRINT", "TASK", "MILESTONE"]);
-  for (const [prefix, meta] of Object.entries(entityTypes)) {
-    if (structuralPrefixes.has(prefix)) continue;
-    const label = meta.label || prefix;
-    const typeName = label.toLowerCase();
-    const btn = document.createElement("button");
-    btn.className = "type-chip";
-    btn.dataset.type = typeName;
-    btn.innerHTML = `<span class="type-dot type-dot-${typeName}"></span>${label}`;
-    container.appendChild(btn);
-  }
+  board.querySelectorAll(".col-add-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openNewItemModal(btn.dataset.stage);
+    });
+  });
 }
 
 function buildItemTypeSelect(entityTypes) {
@@ -3121,16 +3591,17 @@ function buildItemTypeSelect(entityTypes) {
 // ─────────────────────────────────────────────────────────── Bootstrap
 
 async function init() {
-  // Load config from server and apply to UI
   try {
     pmConfig = await apiFetch("/api/config");
-    document.getElementById("projectTitle").textContent = pmConfig.name + " PM";
+    document.getElementById("projectTitle").textContent = pmConfig.name;
     document.title = pmConfig.name + " PM";
-    buildKanbanColumns(pmConfig.stages);
-    buildTypeFilters(pmConfig.entityTypes);
+    COLUMNS = pmConfig.stages || COLUMNS;
+    STAGES_FOR_ITEMS = COLUMNS;
+    buildKanbanColumns(COLUMNS);
     buildItemTypeSelect(pmConfig.entityTypes);
   } catch (err) {
     console.warn("Config load failed, using defaults:", err.message);
+    buildKanbanColumns(COLUMNS);
   }
 
   initEvents();
@@ -3150,60 +3621,51 @@ async function init() {
   es.onopen = () => {
     sseConnected = true;
   };
+  const rerender = debounce(() => {
+    renderActiveContent();
+    renderSidebar();
+    renderRail();
+    if (state.view === "project") renderProjectStrip();
+  }, 100);
   es.onmessage = async (e) => {
     const { entity, id, action } = JSON.parse(e.data);
     if (action === "delete" || action === "archive") {
       removeFromState(entity, id);
-      removeCard(id);
+      if (action === "archive") state.archived = null;
     } else {
       try {
         const updated = await apiFetch(`/api/${entity}s/${id}`);
         upsertInState(entity, id, updated);
-        patchCard(updated, entity);
       } catch {
-        // Entity may have been deleted between event and fetch
         return;
       }
     }
-    // Refresh open plan detail overlay if the updated entity is the displayed plan
+    rerender();
+    // Refresh open plan slide-over if the updated entity is the displayed plan
     if (entity === "plan") {
       const overlay = document.getElementById("detailOverlay");
       if (overlay && !overlay.classList.contains("hidden")) {
-        const displayedId = overlay.querySelector(".detail-id")?.textContent;
+        const displayedId = overlay.querySelector(".slide-id")?.textContent;
         if (displayedId && displayedId.includes(id)) {
           showPlanDetail(id);
         }
       }
     }
-    // Recompute sprint tabs if sprint data changed
-    if (entity === "sprint") {
-      state.activeSprints = state.sprints.filter((s) => s.status === "active").reverse();
-      if (
-        state.selectedSprintId &&
-        !state.activeSprints.find((s) => s.id === state.selectedSprintId)
-      ) {
-        state.selectedSprintId = state.activeSprints[0]?.id ?? null;
-      }
-      renderSprintTabs();
-    }
   };
   es.onerror = async () => {
-    // Only reload on actual reconnect, not initial connection
     if (!sseConnected) return;
     sseConnected = false;
     try {
       await loadAll();
-      renderBoard();
+      rerender();
     } catch {
-      /* retry will happen via EventSource auto-reconnect */
+      /* retry via EventSource auto-reconnect */
     }
   };
 
-  // Ralph status polling — update plan cards with running indicators
+  // Ralph status polling
   async function pollRalphStatus() {
-    try {
-      state.ralphLoops = await apiFetch("/api/ralph");
-    } catch { state.ralphLoops = []; }
+    state.ralphLoops = await fetchRalphLoops();
     annotateRalphCards();
   }
   await pollRalphStatus();
@@ -3222,7 +3684,7 @@ function annotateRalphCards() {
         const dot = document.createElement('span');
         dot.className = 'ralph-card-dot';
         dot.title = 'Ralph running';
-        card.querySelector('.card-id')?.prepend(dot);
+        card.querySelector('.card-top')?.prepend(dot);
       }
     } else {
       card.querySelector('.ralph-card-dot')?.remove();
