@@ -60,4 +60,9 @@ The server is a long-running process that caches code in memory. CLI changes tak
 
 **Malformed files don't brick the CLI.** A data file whose name doesn't match its embedded `id`, or that fails to parse, is **skipped with a warning** during `store.load()` (see `quarantineFile`) instead of throwing. Its filename-derived id is still added to the id pool (`allIdPools` includes `quarantined`), so a later create can't reuse the slot and overwrite the file being fixed. `store.getQuarantined()` reports what was skipped.
 
+**Data-loss guards** (issue #1 — a `git reset` in the surrounding repo rewound the data dir unnoticed for hours):
+- `autoCommit` config flag → `lib/autocommit.js`: debounced git commit of the data dir after every store write, pathspec-scoped so a data dir inside a bigger repo never commits unrelated files. Flushed on process exit and on server SIGTERM.
+- Rewind detection → `lib/rewind.js` + `store.load()`: newest observed timestamp is remembered **outside** the repo (`~/.pm-board-cli/state/`, override with `PM_STATE_DIR` — tests must set it, `setupTestApp` does). If a load sees only older data, it warns loudly and `/api/health` reports `rewound`. API-driven deletes force-sync the state down so they don't false-positive.
+- `pm stop` / `pm update` / `pm serve --restart` wait for the old process to actually exit (SIGKILL fallback) before rebinding the port; `server.js` drains on SIGTERM.
+
 **When adding a route**: write the handler as an exported function, register it on the router, AND add it to the `ROUTE_TABLE` in `lib/dispatch.js` (specific paths before `:id` catch-alls) or the CLI can't reach it.

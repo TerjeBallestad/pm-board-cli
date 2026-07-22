@@ -188,6 +188,7 @@ pm review <type> <id>            # Generate review prompt with knowledge base co
 | `name` | Project name, shown in dashboard header | Directory name |
 | `port` | Dashboard server port | `3333` |
 | `dataDir` | Where PM data lives (relative to config file) | `.pm/data` |
+| `autoCommit` | Git-commit the data dir (debounced) after every write, so a crash or `git reset` loses seconds and is recoverable via `git log`. Works best when the data dir is its own git repo (`git init` inside it, ignore it in the outer repo). | `false` |
 | `stages` | Kanban column stages | `["inbox", "exploring", "sdd", "planned", "done"]` |
 | `entityTypes` | ID prefixes, labels, and colors for item types | See defaults above |
 | `knowledgeBase.command` | CLI command for knowledge base queries | `qmd query` |

@@ -386,7 +386,7 @@ Usage: pm <command> [args] [--flags]
 
 Setup:
   init                           Create pm.config.json in current directory
-  serve [--port N]               Start the PM dashboard server (background)
+  serve [--port N] [--restart]   Start the PM dashboard server (background)
   stop                           Stop the running PM server
   update                         Update pm to latest version
 
@@ -509,14 +509,42 @@ function isProcessAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+async function waitForExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (isProcessAlive(pid)) {
+    if (Date.now() > deadline) return false;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return true;
+}
+
+// SIGTERM, wait for the process to actually exit, SIGKILL as fallback.
+// A fire-and-forget kill races the port check in doServe: the old process can
+// still hold the port when the new one tries to bind, leaving NO server
+// running after `pm update`.
+async function stopServerProcess(pid) {
+  process.kill(pid, 'SIGTERM');
+  if (!(await waitForExit(pid, 5000))) {
+    process.stderr.write(`Server (PID ${pid}) did not exit after SIGTERM — sending SIGKILL\n`);
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    await waitForExit(pid, 2000);
+  }
+  clearPid();
+}
+
 // --- Serve command ---
-function doServe() {
+async function doServe() {
   // Check if already running
   const existing = readPid();
   if (existing && isProcessAlive(existing.pid)) {
-    process.stdout.write(`PM server already running (PID ${existing.pid}, started ${existing.startedAt})\n`);
-    process.stdout.write(`Stop it with: pm stop\n`);
-    return;
+    if (flags.restart === 'true') {
+      process.stdout.write(`Stopping PM server (PID ${existing.pid})...\n`);
+      await stopServerProcess(existing.pid);
+    } else {
+      process.stdout.write(`PM server already running (PID ${existing.pid}, started ${existing.startedAt})\n`);
+      process.stdout.write(`Restart with: pm serve --restart, stop with: pm stop\n`);
+      return;
+    }
   }
 
   const port = flags.port || config?.port || 3333;
@@ -551,7 +579,7 @@ function doServe() {
 }
 
 // --- Stop command ---
-function doStop() {
+async function doStop() {
   const pidData = readPid();
   if (!pidData) {
     process.stderr.write('No PM server running (no pid file found)\n');
@@ -562,21 +590,20 @@ function doStop() {
     clearPid();
     return;
   }
-  process.kill(pidData.pid, 'SIGTERM');
+  await stopServerProcess(pidData.pid);
   process.stdout.write(`Stopped PM server (PID ${pidData.pid})\n`);
-  clearPid();
 }
 
 // --- Self-update command ---
-function doUpdate() {
-  // Stop running server if there is one
+async function doUpdate() {
+  // Stop running server if there is one — and wait for it to be truly dead
+  // BEFORE swapping the package, so the restart can't race it for the port.
   let wasRunning = false;
   if (config) {
     const pidData = readPid();
     if (pidData && isProcessAlive(pidData.pid)) {
       process.stdout.write('Stopping server...\n');
-      process.kill(pidData.pid, 'SIGTERM');
-      clearPid();
+      await stopServerProcess(pidData.pid);
       wasRunning = true;
     }
   }
@@ -594,7 +621,7 @@ function doUpdate() {
   // Restart server if it was running
   if (wasRunning && config) {
     process.stdout.write('Restarting server...\n');
-    doServe();
+    await doServe();
   }
 }
 
@@ -663,15 +690,15 @@ async function main() {
 
     case 'serve':
     case 'start':
-      doServe();
+      await doServe();
       break;
 
     case 'stop':
-      doStop();
+      await doStop();
       break;
 
     case 'update':
-      doUpdate();
+      await doUpdate();
       break;
 
     case 'health':
