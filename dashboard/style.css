@@ -669,6 +669,18 @@ body[data-view="archive"] .rail { display: none; }
   flex-wrap: wrap;
 }
 .pcard-hint { font-size: 10.5px; color: var(--text-2); }
+.pcard-claim {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #e6db74;
+  background: rgba(230, 219, 116, .10);
+  border-radius: 5px;
+  padding: 1px 6px;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .pcard-open {
   margin-left: auto;
   font-size: 11px;
@@ -1027,6 +1039,12 @@ body[data-view="archive"] .rail { display: none; }
 .slide-body {
   flex: 1;
   overflow-y: auto;
+  /* Never allow horizontal scroll: setting only overflow-y makes overflow-x
+     compute to auto, and Safari/WebKit sporadically reports phantom horizontal
+     overflow on overlay open (stale scrollWidth after layout), showing a
+     scrollbar with nothing behind it. (clip would be stronger but computes to
+     hidden when the other axis is auto.) Wide pre/tables scroll internally. */
+  overflow-x: hidden;
   padding: 24px 32px 28px;
   min-height: 0;
 }

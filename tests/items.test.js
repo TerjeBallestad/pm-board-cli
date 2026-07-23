@@ -184,3 +184,97 @@ test('GET /api/items?frontier=true hides blocked and done items', async (t) => {
   assert.equal(free.status, 201);
   assert.equal(ghost.status, 201);
 });
+
+test('claim: sets lease, conflicts for others, refreshes for the same assignee', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const created = await request(app).post('/api/items').send({ type: 'issue', title: 'ticket' });
+  const id = created.body.id;
+
+  const claimed = await request(app).post(`/api/items/${id}/claim`).send({ assignee: 'session-a' });
+  assert.equal(claimed.status, 200);
+  assert.equal(claimed.body.assignee, 'session-a');
+  assert.ok(claimed.body.assignedAt);
+
+  // Another session is refused with the holder's identity in the payload
+  const conflict = await request(app).post(`/api/items/${id}/claim`).send({ assignee: 'session-b' });
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.body.assignee, 'session-a');
+
+  // Same assignee re-claims → lease renewal, not a conflict
+  await new Promise(r => setTimeout(r, 5));
+  const renewed = await request(app).post(`/api/items/${id}/claim`).send({ assignee: 'session-a' });
+  assert.equal(renewed.status, 200);
+  assert.notEqual(renewed.body.assignedAt, claimed.body.assignedAt);
+
+  // Missing assignee is a 400
+  const bad = await request(app).post(`/api/items/${id}/claim`).send({});
+  assert.equal(bad.status, 400);
+});
+
+test('claim: release and stage→done both clear the claim', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const a = await request(app).post('/api/items').send({ type: 'issue', title: 'a' });
+  const b = await request(app).post('/api/items').send({ type: 'issue', title: 'b' });
+
+  await request(app).post(`/api/items/${a.body.id}/claim`).send({ assignee: 's1' });
+  const released = await request(app).post(`/api/items/${a.body.id}/release`).send({});
+  assert.equal(released.body.assignee, null);
+  assert.equal(released.body.assignedAt, null);
+
+  await request(app).post(`/api/items/${b.body.id}/claim`).send({ assignee: 's1' });
+  const done = await request(app).patch(`/api/items/${b.body.id}`).send({ stage: 'done' });
+  assert.equal(done.body.assignee, null);
+
+  // Claiming a done ticket is refused
+  const late = await request(app).post(`/api/items/${b.body.id}/claim`).send({ assignee: 's2' });
+  assert.equal(late.status, 409);
+});
+
+test('frontier excludes live-claimed items; allClaims and expiry bring them back', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const mine = await request(app).post('/api/items').send({ type: 'issue', title: 'mine' });
+  await request(app).post('/api/items').send({ type: 'issue', title: 'free' });
+  await request(app).post(`/api/items/${mine.body.id}/claim`).send({ assignee: 's1' });
+
+  let res = await request(app).get('/api/items?frontier=true');
+  assert.deepEqual(res.body.map(i => i.title), ['free']);
+
+  res = await request(app).get('/api/items?frontier=true&allClaims=true');
+  assert.deepEqual(res.body.map(i => i.title).sort(), ['free', 'mine']);
+});
+
+test('claims expire after claimTtlHours and can be re-claimed', async (t) => {
+  // TTL of ~4ms: the lease is stale by the time we re-read
+  const { app, cleanup } = await setupTestApp({ claimTtlHours: 0.000001 });
+  t.after(cleanup);
+  const created = await request(app).post('/api/items').send({ type: 'issue', title: 'stale' });
+  const id = created.body.id;
+  await request(app).post(`/api/items/${id}/claim`).send({ assignee: 'crashed-session' });
+  await new Promise(r => setTimeout(r, 10));
+
+  const res = await request(app).get('/api/items?frontier=true');
+  assert.deepEqual(res.body.map(i => i.title), ['stale']);
+
+  const reclaimed = await request(app).post(`/api/items/${id}/claim`).send({ assignee: 'new-session' });
+  assert.equal(reclaimed.status, 200);
+  assert.equal(reclaimed.body.assignee, 'new-session');
+});
+
+test('PATCH --assignee is the force/override path', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const created = await request(app).post('/api/items').send({ type: 'issue', title: 'x' });
+  const id = created.body.id;
+  await request(app).post(`/api/items/${id}/claim`).send({ assignee: 's1' });
+
+  const forced = await request(app).patch(`/api/items/${id}`).send({ assignee: 's2' });
+  assert.equal(forced.body.assignee, 's2');
+  assert.ok(forced.body.assignedAt);
+
+  const cleared = await request(app).patch(`/api/items/${id}`).send({ assignee: '' });
+  assert.equal(cleared.body.assignee, null);
+  assert.equal(cleared.body.assignedAt, null);
+});

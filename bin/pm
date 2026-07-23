@@ -36,7 +36,7 @@ const args = process.argv.slice(2);
 const subcmd = args[0] || '';
 const positional = [];
 const flags = {};
-const BOOLEAN_FLAGS = new Set(['all', 'help', 'json']);
+const BOOLEAN_FLAGS = new Set(['all', 'help', 'json', 'all-claims']);
 
 for (let i = 1; i < args.length; i++) {
   if (args[i].startsWith('--')) {
@@ -241,6 +241,7 @@ function printSprintOverview(detail) {
       if (it.priority) cols.push(`[${it.priority}]`);
       const blockers = openBlockers(it);
       if (blockers.length && it.stage !== 'done') cols.push(`⊘ blocked by ${blockers.join(', ')}`);
+      if (it.assignee && it.stage !== 'done') cols.push(`⚑ ${it.assignee}`);
       out.push(cols.join('  '));
     }
   }
@@ -325,6 +326,7 @@ async function fetchListByType(typeArg) {
   if (flags.priority) params.set('priority', flags.priority);
   if (flags.sprint) params.set('sprintId', flags.sprint);
   if (flags.frontier === 'true') params.set('frontier', 'true');
+  if (flags['all-claims'] === 'true') params.set('allClaims', 'true');
   const qs = params.toString();
   return api('GET', `/api/items${qs ? '?' + qs : ''}`, undefined, { silent: true });
 }
@@ -464,6 +466,12 @@ Commands:
                                  oldest→newest, default 20. <type> is one of:
                                  sdd, plan, sprint, issue, decision, concern, gap.
                                  Omit <type> to list all items.
+                                 --frontier: not done, unblocked, not claimed
+                                 (--all-claims: include claimed tickets too)
+  claim <id> --as "label"        Claim a ticket for this session; fails if another
+                                 session holds a live claim (claims expire after
+                                 claimTtlHours, default 4). Closing releases it.
+  release <id>                   Release a claim without closing the ticket
   create <type> "title" [--priority P] [--body B] [--pillar P] [--sprint ID] [--files f1,f2]
                                  Create a new item
   patch <id> [--key value ...]   Update any field on an item/design/plan
@@ -708,6 +716,8 @@ Items (SB, DD, DC, GAP, ...):
   --related IDs         Set related IDs (comma-separated, e.g. SDD-060,DD-042)
   --blockedBy IDs       Set blocking edges (comma-separated; '' clears). Items whose
                         blockers are all done/archived show in "pm list --frontier"
+  --assignee LABEL      Force-set/override a claim ('' clears). Normal claiming
+                        goes through "pm claim <id> --as LABEL" (conflict-checked)
 
 Designs (SDD):
   --title T             Rename
@@ -830,6 +840,26 @@ async function main() {
       if (!id || !text) { process.stderr.write('Usage: pm comment <id> "text" [--author A]\n'); process.exit(1); }
       const path = commentRoute(id);
       await api('POST', path, { text, author: flags.author || 'claude' });
+      break;
+    }
+
+    case 'claim': {
+      const id = positional[0];
+      if (!id) { process.stderr.write('Usage: pm claim <id> --as "session label"\n'); process.exit(1); }
+      const assignee = flags.as || process.env.CLAUDE_SESSION_ID;
+      if (!assignee) {
+        process.stderr.write('Usage: pm claim <id> --as "session label"\n' +
+          'A claim needs an assignee label (who is working this ticket).\n');
+        process.exit(1);
+      }
+      await api('POST', `/api/items/${encodeURIComponent(id)}/claim`, { assignee });
+      break;
+    }
+
+    case 'release': {
+      const id = positional[0];
+      if (!id) { process.stderr.write('Usage: pm release <id>\n'); process.exit(1); }
+      await api('POST', `/api/items/${encodeURIComponent(id)}/release`, {});
       break;
     }
 

@@ -1401,9 +1401,12 @@ function projectTicketCardHTML(t, column) {
 
   if (column === "frontier") {
     const hitl = HITL_KINDS.has(kind);
-    const hint = hitl
-      ? `<span class="pcard-hint" style="color:${color}">needs a session</span>`
-      : `<span class="pcard-hint">${escText(t.stage)}</span>`;
+    // A live claim expires server-side (claimTtlHours); here we just show it.
+    const hint = t.assignee
+      ? `<span class="pcard-claim" title="claimed ${escAttr(t.assignedAt || "")}">⚑ ${escText(t.assignee)}</span>`
+      : hitl
+        ? `<span class="pcard-hint" style="color:${color}">needs a session</span>`
+        : `<span class="pcard-hint">${escText(t.stage)}</span>`;
     return `
       <div class="pcard pcard-frontier" data-id="${escAttr(t.id)}" style="border-color:${color}55">
         <div class="pcard-top">

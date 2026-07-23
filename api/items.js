@@ -22,6 +22,15 @@ function readSidecarTests(subdir, id) {
 // Handlers are plain (req,res) callbacks reusable by both Express and the
 // serverless dispatch layer (lib/dispatch.js).
 
+// A claim is a lease, not a lock: expiry is computed at read time so a crashed
+// session can never freeze part of the frontier. No daemon, no heartbeat.
+export function isClaimLive(item, now = Date.now()) {
+  if (!item.assignee || !item.assignedAt) return false;
+  const ttlHours = getConfig().claimTtlHours;
+  if (!Number.isFinite(ttlHours) || ttlHours <= 0) return true; // 0/invalid = never expire
+  return now - Date.parse(item.assignedAt) < ttlHours * 3600 * 1000;
+}
+
 export const listArchived = (req, res) => {
   let items = store.getArchive().items;
   if (req.query.type) items = items.filter(i => i.type === req.query.type);
@@ -48,11 +57,13 @@ export const listItems = (req, res) => {
   if (req.query.priority) items = items.filter(i => i.priority === req.query.priority);
   if (req.query.sprintId) items = items.filter(i => i.sprintId === req.query.sprintId);
   if (req.query.frontier === 'true') {
-    // Frontier = not done, and no blocker that is itself an active, not-done item.
+    // Frontier = not done, no blocker that is itself an active, not-done item,
+    // and not live-claimed by a session (allClaims=true keeps claimed items).
     // Blockers that are done, archived, or unknown ids do not block.
     const activeById = new Map(store.get().items.map(i => [i.id, i]));
     items = items.filter(i => {
       if (i.stage === 'done') return false;
+      if (req.query.allClaims !== 'true' && isClaimLive(i)) return false;
       const blockers = Array.isArray(i.blockedBy) ? i.blockedBy : [];
       return !blockers.some(id => {
         const blocker = activeById.get(id);
@@ -96,6 +107,8 @@ export const createItem = (req, res) => {
     affectedFiles: affectedFiles || [],
     blockedBy: blockedBy || [],
     sprintId: req.body.sprintId || null,
+    assignee: null,
+    assignedAt: null,
     comments: [],
     createdAt: now, updatedAt: now
   };
@@ -113,15 +126,23 @@ export const patchItem = (req, res) => {
   coerceArrayField(req.body, 'related');
   coerceArrayField(req.body, 'affectedFiles');
   coerceArrayField(req.body, 'blockedBy');
-  const allowed = ['title', 'priority', 'pillar', 'stage', 'body', 'related', 'affectedFiles', 'blockedBy', 'sprintId'];
+  const allowed = ['title', 'priority', 'pillar', 'stage', 'body', 'related', 'affectedFiles', 'blockedBy', 'sprintId', 'assignee'];
   for (const key of allowed) {
     if (req.body[key] !== undefined) item[key] = req.body[key];
+  }
+  if (req.body.assignee !== undefined) {
+    // Patch is the force/override path — no conflict check (that's POST :id/claim).
+    item.assignee = req.body.assignee || null;
+    item.assignedAt = item.assignee ? new Date().toISOString() : null;
   }
   if (req.body.stage && !stages.includes(req.body.stage)) {
     return res.status(400).json({ error: `Invalid stage. Must be one of: ${stages.join(', ')}` });
   }
-  if (req.body.stage === 'done' && !item.doneAt) {
-    item.doneAt = new Date().toISOString();
+  if (req.body.stage === 'done') {
+    if (!item.doneAt) item.doneAt = new Date().toISOString();
+    // Closing a ticket releases its claim — the common path needs no explicit release.
+    item.assignee = null;
+    item.assignedAt = null;
   }
   item.updatedAt = new Date().toISOString();
   store.writeEntity('items', item.id, item);
@@ -135,6 +156,38 @@ export const deleteItem = (req, res) => {
   data.items.splice(idx, 1);
   store.deleteEntity('items', req.params.id);
   res.status(204).end();
+};
+
+export const claimItem = (req, res) => {
+  const item = store.get().items.find(i => i.id === req.params.id);
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  const assignee = req.body?.assignee;
+  if (!assignee) return res.status(400).json({ error: 'assignee required' });
+  if (item.stage === 'done') return res.status(409).json({ error: `${item.id} is already done` });
+  // Conditional: refuse if someone else holds a live claim. Re-claiming your
+  // own ticket refreshes the lease; an expired claim is free to take.
+  if (isClaimLive(item) && item.assignee !== assignee) {
+    return res.status(409).json({
+      error: `${item.id} is claimed by "${item.assignee}" since ${item.assignedAt} — pick another frontier ticket (pm patch --assignee to override)`,
+      assignee: item.assignee,
+      assignedAt: item.assignedAt
+    });
+  }
+  item.assignee = assignee;
+  item.assignedAt = new Date().toISOString();
+  item.updatedAt = item.assignedAt;
+  store.writeEntity('items', item.id, item);
+  res.json(item);
+};
+
+export const releaseItem = (req, res) => {
+  const item = store.get().items.find(i => i.id === req.params.id);
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  item.assignee = null;
+  item.assignedAt = null;
+  item.updatedAt = new Date().toISOString();
+  store.writeEntity('items', item.id, item);
+  res.json(item);
 };
 
 export const addItemComment = (req, res) => {
@@ -163,5 +216,7 @@ router.post('/', createItem);
 router.patch('/:id', patchItem);
 router.delete('/:id', deleteItem);
 router.post('/:id/comments', addItemComment);
+router.post('/:id/claim', claimItem);
+router.post('/:id/release', releaseItem);
 
 export default router;

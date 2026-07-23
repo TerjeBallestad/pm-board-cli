@@ -112,10 +112,19 @@ pm get <id> [--brief]            # Any entity by ID; --brief = metadata only, no
 pm list [<type>] [--stage S] [--priority P] [--sprint ID] [--frontier] [--limit N] [--all] [--json]
                                  # Terse "ID  title" lines, oldest→newest, default 20.
                                  # <type>: sdd, plan, sprint, issue, decision, concern, gap.
-                                 # --frontier: only items whose blockers are all done/archived.
+                                 # --frontier: not done, blockers all done/archived, and not
+                                 # claimed by a live session (--all-claims: include claimed).
+
+# Claims — "another session already has this ticket"
+pm claim <id> --as "label"       # Claim for this session; exits 1 if someone else holds a
+                                 # live claim. Claims are leases: they expire after
+                                 # claimTtlHours (default 4), so a crashed session can't
+                                 # freeze a ticket. Closing (stage done) auto-releases.
+pm release <id>                  # Release without closing
 
 # Update — patch any field on any entity
 pm patch <id> [--stage S] [--priority P] [--title T] [--body B] [--blockedBy IDs] ...
+pm patch <id> --assignee "label" # Force-set/override a claim ('' clears)
 pm comment <id> "text" [--author A]   # Add comment (default author: claude)
 
 # Archive
@@ -263,6 +272,7 @@ pm review <type> <id>            # Generate review prompt with knowledge base co
 | `dataDir` | Where PM data lives (relative to config file) | `.pm/data` |
 | `autoCommit` | Git-commit the data dir (debounced) after every write — see [Data safety](#data-safety) | `false` |
 | `autoSync` | Pull/push the data-dir repo automatically for multi-machine use — see [Data safety](#data-safety) | `false` |
+| `claimTtlHours` | Hours before a session's claim goes stale and stops hiding the item from `--frontier` (`0` = never expire) | `4` |
 | `stages` | Kanban column stages | `["inbox", "exploring", "sdd", "planned", "done"]` |
 | `entityTypes` | ID prefixes, labels, and colors for item types | See defaults above |
 | `commands` | Templates for the dashboard's **⧉ Start** buttons — `{id}`/`{title}` placeholders, copied to clipboard. Omit a template and the button doesn't render. `ticket` can map per item type or use `default`. | Generic prompts |
@@ -349,10 +359,12 @@ Point `frontend.dir` at any directory with static files (index.html, JS, CSS). T
 |----------|--------|-------------|
 | `/api/config` | GET | Project name, stages, entity types, commands |
 | `/api/health` | GET | Health check (reports `rewound` after a detected data-dir rewind) |
-| `/api/items` | GET | List items (query: type, stage, priority, sprintId, frontier) |
+| `/api/items` | GET | List items (query: type, stage, priority, sprintId, frontier, allClaims) |
 | `/api/items` | POST | Create item |
 | `/api/items/:id` | GET / PATCH / DELETE | Get / update / delete item |
 | `/api/items/:id/comments` | POST | Add comment |
+| `/api/items/:id/claim` | POST | Claim item (`{ assignee }`; 409 if live-claimed by another) |
+| `/api/items/:id/release` | POST | Release a claim |
 | `/api/items/archived` | GET | List archived items |
 | `/api/items/archive` | POST | Archive items (`{ ids: [...] }`) |
 | `/api/items/archive/sweep` | POST | Auto-archive done items (`{ days: N }`) |
