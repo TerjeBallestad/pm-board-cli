@@ -197,6 +197,72 @@ function printList(items) {
   }
 }
 
+// --- Sprint/project overview formatter ---
+// Progressive disclosure for agents: `pm project` prints a one-line-per-entity
+// overview (stage, open blockers, plan progress) instead of the full JSON dump
+// with every body/comment inlined. Drill down with `pm get <id>`; --json keeps
+// the raw detail for scripts.
+function truncate(str, len) {
+  const s = String(str || '').replace(/\s+/g, ' ').trim();
+  return s.length > len ? s.slice(0, len - 1) + '…' : s;
+}
+function printSprintOverview(detail) {
+  const out = [];
+  const { items = [], designs = [], plans = [], ...sprint } = detail;
+  out.push(`${sprint.id}  ${sprint.name}  (${sprint.status})`);
+  if (sprint.problemStatement) out.push(`Destination: ${truncate(sprint.problemStatement, 200)}`);
+
+  const itemsById = new Map(items.map(i => [i.id, i]));
+  // A blocker only matters while it isn't done; unknown ids (outside this
+  // sprint) are kept — we can't prove they're resolved.
+  const openBlockers = (it) => (it.blockedBy || []).filter(b => {
+    const dep = itemsById.get(b);
+    return !dep || dep.stage !== 'done';
+  });
+  const stageOrder = config?.stages || [];
+  const stageRank = (s) => {
+    const idx = stageOrder.indexOf(s);
+    return idx === -1 ? stageOrder.length : idx;
+  };
+
+  if (items.length) {
+    const done = items.filter(i => i.stage === 'done').length;
+    out.push('', `Items (${done}/${items.length} done):`);
+    const sorted = [...items].sort((a, b) =>
+      stageRank(a.stage) - stageRank(b.stage) || String(a.id).localeCompare(b.id));
+    const idWidth = Math.max(...sorted.map(i => String(i.id).length));
+    const stageWidth = Math.max(...sorted.map(i => String(i.stage || '?').length));
+    for (const it of sorted) {
+      const cols = [
+        `  ${String(it.id).padEnd(idWidth)}`,
+        String(it.stage || '?').padEnd(stageWidth),
+        truncate(it.title, 76)
+      ];
+      if (it.priority) cols.push(`[${it.priority}]`);
+      const blockers = openBlockers(it);
+      if (blockers.length && it.stage !== 'done') cols.push(`⊘ blocked by ${blockers.join(', ')}`);
+      out.push(cols.join('  '));
+    }
+  }
+
+  if (designs.length) {
+    out.push('', `Designs (${designs.length}):`);
+    for (const d of designs) out.push(`  ${d.id}  ${truncate(d.title, 76)}`);
+  }
+  if (plans.length) {
+    out.push('', `Plans (${plans.length}):`);
+    for (const p of plans) {
+      const tasks = p.tasks || [];
+      const progress = tasks.length ? `  tasks ${tasks.filter(t => t.passes).length}/${tasks.length}` : '';
+      out.push(`  ${p.id}  ${truncate(p.title, 76)}${progress}`);
+    }
+  }
+  if (sprint.comments?.length) out.push('', `Comments: ${sprint.comments.length} (see --json)`);
+  if (sprint.body) out.push(`Project doc: ${sprint.body.length} chars (see --json)`);
+  out.push('', `Drill down: pm get <id> · full JSON: pm project ${sprint.id} --json`);
+  process.stdout.write(out.join('\n') + '\n');
+}
+
 // --- List type resolution ---
 // Canonical list types: 'sdd', 'plan', 'sprint', plus per-config item types
 // (e.g. 'issue', 'decision', 'concern', 'gap'). The resolver accepts prefix
@@ -392,7 +458,7 @@ Setup:
 
 Commands:
   health                         Server health check
-  get <id>                       Get item by ID
+  get <id> [--brief]             Get item by ID (--brief: metadata only, no body/comments)
   list [<type>] [--stage S] [--priority P] [--sprint ID] [--frontier] [--limit N] [--all] [--json]
                                  List entities — terse "ID  title", sorted
                                  oldest→newest, default 20. <type> is one of:
@@ -435,7 +501,8 @@ Plan / Task:
   plan-update <plan-id> [--tasks @file.json] [--title T] [--stage S]
 
 Project (alias: sprint — ids stay SPRINT-NNN):
-  project [id]                   Get project detail incl. its items/designs/plans
+  project [id] [--json]          Project overview: items w/ stage + open blockers,
+                                 designs, plan progress (--json: full detail dump)
   project create "name" [--destination "where this arrives"] [--body "markdown doc"]
                                  Create a new project (status: active)
   project <SPRINT-id> [--name N] [--destination D] [--body B] [--status S]
@@ -708,7 +775,17 @@ async function main() {
     case 'get': {
       const id = positional[0];
       if (!id) { process.stderr.write('Usage: pm get <id>\n'); process.exit(1); }
-      await api('GET', routeById(id));
+      if (flags.brief === 'true') {
+        // Metadata-only view: everything except the large free-text fields,
+        // with size hints so agents know when a full `pm get` is worth it.
+        const entity = await api('GET', routeById(id), undefined, { silent: true });
+        const { body, comments, ...rest } = entity;
+        if (body) rest.bodyChars = body.length;
+        if (comments?.length) rest.commentCount = comments.length;
+        process.stdout.write(JSON.stringify(rest, null, 2) + '\n');
+      } else {
+        await api('GET', routeById(id));
+      }
       break;
     }
 
@@ -947,7 +1024,8 @@ async function main() {
         await api('PATCH', `/api/sprints/${action}`, patchBody);
         break;
       }
-      // pm sprint [id] — get sprint detail (default: active sprint)
+      // pm sprint [id] — get sprint detail (default: active sprint).
+      // Compact overview by default; --json for the full dump.
       let sprintId = action;
       if (!sprintId) {
         const sprints = await api('GET', '/api/sprints', undefined, { silent: true });
@@ -955,7 +1033,9 @@ async function main() {
         if (!active) { process.stderr.write('No active sprint found\n'); process.exit(1); }
         sprintId = active.id;
       }
-      await api('GET', `/api/sprints/${sprintId}`);
+      const detail = await api('GET', `/api/sprints/${sprintId}`, undefined, { silent: true });
+      if (flags.json === 'true') process.stdout.write(JSON.stringify(detail, null, 2) + '\n');
+      else printSprintOverview(detail);
       break;
     }
 
