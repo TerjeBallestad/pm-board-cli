@@ -2714,7 +2714,7 @@ function showDetailOverlay(itemId) {
     </div>
     <div class="slide-body">
       <div class="detail-title">
-        <input type="text" id="detailTitleInput" value="${escAttr(item.title)}" />
+        <textarea id="detailTitleInput" rows="1">${escText(item.title)}</textarea>
       </div>
       <div class="detail-meta">
         <label class="meta-item"><span>Stage</span><select id="detailStageSelect">${stageOptions}</select></label>
@@ -2767,6 +2767,7 @@ function showDetailOverlay(itemId) {
     .addEventListener("click", () => closeDetailOverlay());
 
   const titleInput = document.getElementById("detailTitleInput");
+  initTitleTextarea(titleInput);
   const originalTitle = item.title;
   titleInput.addEventListener("blur", async () => {
     const newTitle = titleInput.value.trim();
@@ -2969,7 +2970,7 @@ function showSddDetail(sddId) {
     </div>
     <div class="slide-body">
       <div class="detail-title">
-        <input type="text" id="detailTitleInput" value="${escAttr(sdd.title || sdd.name || "")}" />
+        <textarea id="detailTitleInput" rows="1">${escText(sdd.title || sdd.name || "")}</textarea>
       </div>
       <div class="detail-meta">
         <label class="meta-item"><span>Project</span><select id="detailSprintSelect">${buildSprintOptions(sdd.sprintId)}</select></label>
@@ -3010,6 +3011,7 @@ function showSddDetail(sddId) {
     .addEventListener("click", () => closeDetailOverlay());
 
   const titleInput = document.getElementById("detailTitleInput");
+  initTitleTextarea(titleInput);
   const originalTitle = sdd.title || sdd.name || "";
   titleInput.addEventListener("blur", async () => {
     const newTitle = titleInput.value.trim();
@@ -3770,6 +3772,25 @@ async function init() {
   }
   await pollRalphStatus();
   setInterval(pollRalphStatus, 10000);
+}
+
+/**
+ * Title fields are textareas so long titles wrap, but they behave like inputs:
+ * height tracks content, Enter commits (blur) instead of inserting a newline.
+ */
+function initTitleTextarea(el) {
+  const autosize = () => {
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  };
+  autosize();
+  el.addEventListener("input", autosize);
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      el.blur();
+    }
+  });
 }
 
 /** Add/remove ralph running indicators on plan cards in the board */

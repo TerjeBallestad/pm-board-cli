@@ -1069,8 +1069,11 @@ body[data-view="archive"] .rail { display: none; }
 /* Detail internals */
 
 .detail-title { margin-bottom: 14px; }
-.detail-title input {
+.detail-title textarea {
+  display: block;
   width: 100%;
+  resize: none;
+  overflow: hidden;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -1083,8 +1086,8 @@ body[data-view="archive"] .rail { display: none; }
   padding: 4px 6px;
   margin-left: -6px;
 }
-.detail-title input:hover { border-color: var(--input-border); }
-.detail-title input:focus { outline: none; border-color: var(--accent-deep); background: var(--input); }
+.detail-title textarea:hover { border-color: var(--input-border); }
+.detail-title textarea:focus { outline: none; border-color: var(--accent-deep); background: var(--input); }
 
 .detail-meta {
   display: flex;
@@ -1118,12 +1121,15 @@ body[data-view="archive"] .rail { display: none; }
 .detail-body-wrapper { position: relative; margin-bottom: 10px; }
 .detail-body-toolbar {
   position: absolute;
-  top: 0;
+  top: -8px;
   right: 0;
   opacity: 0;
   transition: opacity .12s ease;
   z-index: 2;
 }
+/* Sits on top of body text — needs a solid fill to stay legible */
+.detail-body-toolbar .btn { background: var(--panel); }
+.detail-body-toolbar .btn:hover { background: var(--input); }
 .detail-body-wrapper:hover .detail-body-toolbar { opacity: 1; }
 
 .detail-body {
