@@ -75,6 +75,7 @@ pm list --server                           # use the local dashboard server from
 
 - **Malformed files don't brick the CLI.** On load, PM validates that each data file's name matches its embedded `id`. A malformed or mismatched file (e.g. after a bad merge or hand edit) is skipped with a warning — the rest of your data stays usable — and its id stays **reserved** so a later create never overwrites the file you're fixing.
 - **Auto-commit** (opt-in): set `"autoCommit": true` and every store write triggers a debounced git commit of the data dir, so a crash or stray `git reset` loses seconds of work and everything is recoverable via `git log`. Works best when the data dir is its own git repo.
+- **Auto-sync** (opt-in, requires `autoCommit` + a data-dir repo with a remote): set `"autoSync": true` and PM keeps multiple machines converged over git — pull-rebase when the server starts and every 5 minutes while it runs, background push after each auto-commit. The network never sits on the local read/write path; a conflicted pull aborts back to local state and warns so a human resolves it.
 - **Rewind detection**: PM remembers the newest data timestamp *outside* the repo (`~/.pm-board-cli/state/`). If a load suddenly sees only older data — the signature of an unnoticed `git reset` or checkout — it warns loudly, and `pm health` reports `rewound`.
 - Sequential ids can still collide if two offline processes create the same entity type concurrently; avoid parallel local writes.
 
@@ -261,6 +262,7 @@ pm review <type> <id>            # Generate review prompt with knowledge base co
 | `port` | Dashboard server port | `3333` |
 | `dataDir` | Where PM data lives (relative to config file) | `.pm/data` |
 | `autoCommit` | Git-commit the data dir (debounced) after every write — see [Data safety](#data-safety) | `false` |
+| `autoSync` | Pull/push the data-dir repo automatically for multi-machine use — see [Data safety](#data-safety) | `false` |
 | `stages` | Kanban column stages | `["inbox", "exploring", "sdd", "planned", "done"]` |
 | `entityTypes` | ID prefixes, labels, and colors for item types | See defaults above |
 | `commands` | Templates for the dashboard's **⧉ Start** buttons — `{id}`/`{title}` placeholders, copied to clipboard. Omit a template and the button doesn't render. `ticket` can map per item type or use `default`. | Generic prompts |
