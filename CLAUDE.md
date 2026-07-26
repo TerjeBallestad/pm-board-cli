@@ -23,7 +23,7 @@ Editing files in this repo has NO effect on the running `pm` command.
 **Verifying CLI fixes** — run the dev copy directly to test without touching the global install:
 
 ```bash
-node /Users/godstemning/dev/pm-board-cli/bin/pm patch PLAN-001 --tasks @file.json
+node /Users/godstemning/projects-local/pm-board-cli/bin/pm patch PLAN-001 --tasks @file.json
 ```
 
 This uses your edited code while the production `pm` remains untouched. Compare behavior between the two if needed.
@@ -66,3 +66,7 @@ The server is a long-running process that caches code in memory. CLI changes tak
 - `pm stop` / `pm update` / `pm serve --restart` wait for the old process to actually exit (SIGKILL fallback) before rebinding the port; `server.js` drains on SIGTERM.
 
 **When adding a route**: write the handler as an exported function, register it on the router, AND add it to the `ROUTE_TABLE` in `lib/dispatch.js` (specific paths before `:id` catch-alls) or the CLI can't reach it.
+
+**Per-type behaviour is config, not code.** `entityTypes[PREFIX]` takes two optional flags, both defaulting to true: `frontier: false` (never offered as claimable work — off `?frontier=true`, off the kanban board, out of ticket counts) and `sweep: false` (never auto-archived). `TERM` sets both; `DD` sets only `sweep`, which is what its old hardcoded exemption in `sweepDoneItems` meant. Read them via `getNonFrontierTypes()` / `getNonSweepTypes()` — never re-hardcode a type string. Note `bin/pm` parses `pm.config.json` itself, so it unions the raw file with `getDefaultEntityTypes()` (`itemEntityTypes()`) to resolve id prefixes the same way the server's `mergeDeep` does.
+
+**The glossary** (`TERM` items: `title` = the word, `body` = the definition, `aliases` = explicit inflections, empty body + `related` = a "signpost" for an ambiguous word). `lib/glossary.js` owns detection and is **shared verbatim** by `bin/pm` and the dashboard — `lib/app.js` serves it at `/glossary.js` and `index.html` loads it as a module into `window.PMGlossary`. It must therefore stay **pure ESM: no node builtins, no DOM, no HTML** (`tests/glossary.test.js` enforces this). Linking is presentational only — bodies are never rewritten, so a renamed term just stops linking.

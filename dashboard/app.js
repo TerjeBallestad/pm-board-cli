@@ -27,7 +27,7 @@ const state = {
   search: "",
   kindFilter: new Set(),
   draggedCard: null,
-  view: "tickets", // tickets | project | inbox | documents | decisions | tests | archive
+  view: "tickets", // tickets | project | inbox | documents | decisions | glossary | tests | archive
   ralphLoops: [],
   testsCatalogue: null,
   testsFilter: "all",
@@ -78,8 +78,47 @@ function kindColor(kind) {
   return KIND_COLORS[kind] || "#9b9fad";
 }
 
+// Types whose entityTypes entry sets frontier:false are reference material, not
+// work — they never appear on the board or in ticket counts. Decisions are kept
+// out of the board separately, by having their own view.
+function nonFrontierTypes() {
+  const out = new Set();
+  for (const [prefix, meta] of Object.entries(pmConfig.entityTypes || {})) {
+    if (meta && meta.frontier === false) out.add(String(meta.label || prefix).toLowerCase());
+  }
+  return out;
+}
+
 function isTicket(item) {
-  return item.type !== "decision";
+  return item.type !== "decision" && !nonFrontierTypes().has(item.type);
+}
+
+// ─────────────────────────────────────────────────────────── Glossary index
+
+let _termIndex = null;
+let _termSig = "";
+
+/**
+ * The compiled term matcher, rebuilt only when the terms themselves change.
+ *
+ * The signature is derived from the TERM subset of state.items rather than
+ * hooked into the SSE handler, so invalidation cannot be forgotten — SSE,
+ * loadAll(), and optimistic local edits are all covered for free. Because it
+ * only covers terms, the debounced re-render burst after an ordinary ticket
+ * edit rebuilds nothing.
+ */
+function getTermIndex() {
+  const glossary = window.PMGlossary;
+  if (!glossary) return null;
+  const terms = state.items.filter(glossary.isTerm);
+  let sig = terms.length + "|";
+  for (const t of terms) sig += t.id + ":" + (t.updatedAt || "") + ";";
+  if (sig !== _termSig) {
+    _termSig = sig;
+    _termIndex = glossary.buildTermIndex(terms, { transform: escMd });
+    for (const c of _termIndex.conflicts) console.warn("[glossary]", glossary.describeConflict(c));
+  }
+  return _termIndex;
 }
 
 // ─────────────────────────────────────────────────────────── Resolution / frontier
@@ -176,6 +215,7 @@ let _skipPush = false; // prevent pushRoute during applyRoute-triggered renders
 function currentBoardPath() {
   switch (state.view) {
     case "decisions": return "/decisions";
+    case "glossary": return "/glossary";
     case "tests": return "/tests";
     case "inbox": return "/inbox";
     case "documents": return "/documents";
@@ -199,6 +239,7 @@ const VIEW_CONTAINERS = {
   documents: "documentsView",
   plans: "plansView",
   decisions: "decisionsView",
+  glossary: "glossaryView",
   tests: "testsView",
   archive: "archiveView",
 };
@@ -223,6 +264,7 @@ function renderCurrentView() {
   renderTopbar();
   switch (state.view) {
     case "decisions": renderDecisionsView(); break;
+    case "glossary": renderGlossaryView(); break;
     case "tests": renderTestsView(); break;
     case "inbox": renderInboxView(); break;
     case "documents": renderDocumentsView(); break;
@@ -258,6 +300,7 @@ function applyRoute() {
   const id = parts[1] || "";
 
   if (section === "decisions") state.view = "decisions";
+  else if (section === "glossary") state.view = "glossary";
   else if (section === "tests") state.view = "tests";
   else if (section === "inbox") state.view = "inbox";
   else if (section === "documents") state.view = "documents";
@@ -349,6 +392,16 @@ function escText(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+// The exact escaping mdToHtml applies to every source line. The glossary index
+// compiles its surfaces through this same function, or a term containing & or <
+// would never match the escaped text the linkifier scans.
+function escMd(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 /** Build <option> list for sprint assignment dropdown */
@@ -538,18 +591,16 @@ function initImageUpload(textarea) {
 
 // ─────────────────────────────────────────────────────────── Markdown renderer
 
-function mdToHtml(text) {
+// `seen` tracks which glossary terms have already been linked in THIS body, so
+// only the first mention becomes a chip (linking every "shape" is unreadable).
+// It is threaded through the blockquote recursion below — without that, a term
+// first appearing inside a quote would link again in the surrounding text.
+function mdToHtml(text, seen = new Set()) {
   if (!text) return "";
 
-  function escHtml(s) {
-    return s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
+  const escHtml = escMd;
 
-  function inlineFormat(line) {
+  function inlineFormat(line, opts = {}) {
     let s = escHtml(line);
     // Inline code
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -573,7 +624,70 @@ function mdToHtml(text) {
     s = s.replace(/\b([A-Z]{2,10}-\d{2,5})\b(?![^<]*<\/(?:code|a)>)/g, (m, id) => {
       return `<span class="md-entity-ref" data-ref-id="${id}">${id}</span>`;
     });
+    // Glossary terms, last so entity-id spans already exist and can't be eaten.
+    // Presentational only — bodies are never rewritten on disk, so a renamed or
+    // deleted term simply stops linking instead of leaving dead markup behind.
+    if (opts.terms !== false) s = linkifyTerms(s, seen);
     return s;
+  }
+
+  /**
+   * Wrap first-occurrence glossary terms in already-formatted inline HTML.
+   *
+   * SAFETY: splitting on /(<[^>]+>)/ is sound only because of where we sit in
+   * the chain. escHtml has already turned every source < and > into entities,
+   * and every tag in this string was emitted by inlineFormat itself with
+   * attribute-safe content (escHtml'd alt text, scheme-filtered URLs, /[A-Z]-\d/
+   * ids). So no attribute value can contain a '>' and the split cannot
+   * under-match. This argument does NOT generalise to arbitrary HTML.
+   *
+   * Tags land on odd indices and are never rewritten, which is what makes every
+   * attribute value — alt, href, data-ref-id, class — untouchable by construction.
+   */
+  function linkifyTerms(html, seen) {
+    const glossary = window.PMGlossary;
+    const index = getTermIndex();
+    if (!glossary || !index || index.size === 0) return html;
+    const parts = html.split(/(<[^>]+>)/);
+    let skip = 0;
+    let out = "";
+    for (let k = 0; k < parts.length; k++) {
+      const part = parts[k];
+      if (k % 2 === 1) {
+        if (/^<(code|a)\b/i.test(part) || /^<span[^>]*md-entity-ref/i.test(part)) skip++;
+        else if (/^<\/(code|a|span)>/i.test(part) && skip > 0) skip--;
+        out += part;
+        continue;
+      }
+      out += skip > 0 ? part : replaceFirstTerms(part, index, seen, glossary);
+    }
+    return out;
+  }
+
+  function replaceFirstTerms(text, index, seen, glossary) {
+    const matches = glossary
+      .firstMatchPerTerm(glossary.findTermMatches(text, index))
+      .filter((m) => !seen.has(m.termId));
+    if (!matches.length) return text;
+    let out = "";
+    let cur = 0;
+    for (const m of matches) {
+      seen.add(m.termId); // per-body, owned by mdToHtml — Wikipedia's first-mention rule
+      out += text.slice(cur, m.start) + termSpan(m);
+      cur = m.end;
+    }
+    return out + text.slice(cur);
+  }
+
+  // A signpost is a word that means two things: it gets a warning chip, never a
+  // link, so the glossary reads as an ambiguity detector rather than a dictionary.
+  function termSpan(m) {
+    const cls = m.kind === "signpost" ? "md-term md-term-ambiguous" : "md-term";
+    const tip = m.kind === "signpost"
+      ? ` title="Ambiguous — use ${escHtml(m.targetTitles.join(", "))} instead"`
+      : ` title="${escHtml(m.title)}"`;
+    // m.text is a slice of already-escaped HTML — re-escaping would double it.
+    return `<span class="${cls}" data-term-id="${escHtml(m.termId)}"${tip}>${m.text}</span>`;
   }
 
   const lines = text.split("\n");
@@ -609,25 +723,25 @@ function mdToHtml(text) {
     // Headings
     const h4 = line.match(/^####\s+(.*)/);
     if (h4) {
-      out.push(`<h4>${inlineFormat(h4[1])}</h4>`);
+      out.push(`<h4>${inlineFormat(h4[1], { terms: false })}</h4>`);
       i++;
       continue;
     }
     const h3 = line.match(/^###\s+(.*)/);
     if (h3) {
-      out.push(`<h3>${inlineFormat(h3[1])}</h3>`);
+      out.push(`<h3>${inlineFormat(h3[1], { terms: false })}</h3>`);
       i++;
       continue;
     }
     const h2 = line.match(/^##\s+(.*)/);
     if (h2) {
-      out.push(`<h2>${inlineFormat(h2[1])}</h2>`);
+      out.push(`<h2>${inlineFormat(h2[1], { terms: false })}</h2>`);
       i++;
       continue;
     }
     const h1 = line.match(/^#\s+(.*)/);
     if (h1) {
-      out.push(`<h1>${inlineFormat(h1[1])}</h1>`);
+      out.push(`<h1>${inlineFormat(h1[1], { terms: false })}</h1>`);
       i++;
       continue;
     }
@@ -639,7 +753,7 @@ function mdToHtml(text) {
         quoteLines.push(lines[i].replace(/^>\s?/, ""));
         i++;
       }
-      out.push(`<blockquote>${mdToHtml(quoteLines.join("\n"))}</blockquote>`);
+      out.push(`<blockquote>${mdToHtml(quoteLines.join("\n"), seen)}</blockquote>`);
       continue;
     }
 
@@ -659,7 +773,7 @@ function mdToHtml(text) {
         const headers = parseCells(tableLines[0]);
         const rows = tableLines.slice(2);
         let tbl = "<table><thead><tr>";
-        for (const h of headers) tbl += `<th>${inlineFormat(h)}</th>`;
+        for (const h of headers) tbl += `<th>${inlineFormat(h, { terms: false })}</th>`;
         tbl += "</tr></thead><tbody>";
         for (const r of rows) {
           const cells = parseCells(r);
@@ -750,6 +864,16 @@ function wireEntityRefs(container) {
     el.addEventListener("click", (e) => {
       e.stopPropagation();
       openEntityById(el.dataset.refId);
+    });
+  });
+  // Called from here rather than at each render site, so every surface that
+  // already wires entity refs gets term links without a separate call to forget.
+  container.querySelectorAll(".md-term[data-term-id]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Signposts open too: the term's detail view renders its `related` as
+      // chips, so the disambiguation page is the existing UI, for free.
+      openEntityById(el.dataset.termId);
     });
   });
 }
@@ -868,6 +992,7 @@ function navCounts() {
     documents: state.designs.filter((d) => d.stage !== "done").length,
     plans: state.plans.filter((p) => p.stage !== "done").length,
     decisions: state.items.filter((i) => i.type === "decision").length,
+    glossary: state.items.filter((i) => i.type === "term").length,
   };
 }
 
@@ -882,6 +1007,7 @@ function renderSidebar() {
     { view: "documents", label: "Documents", count: counts.documents, swatch: "swatch-indigo" },
     { view: "plans", label: "Plans", count: counts.plans, swatch: "swatch-green" },
     { view: "decisions", label: "Decisions", count: counts.decisions, swatch: "swatch-blue" },
+    { view: "glossary", label: "Glossary", count: counts.glossary, swatch: "swatch-green" },
     { view: "tests", label: "Tests", count: null, swatch: "swatch-neutral" },
     { view: "archive", label: "Archive", count: null, swatch: "swatch-neutral" },
   ];
@@ -975,6 +1101,7 @@ const VIEW_TITLES = {
   documents: "Documents",
   plans: "Plans",
   decisions: "Decisions",
+  glossary: "Glossary",
   tests: "Tests",
   archive: "Archive",
 };
@@ -1011,6 +1138,7 @@ function renderTopbar() {
       state.view === "inbox" ? `<span class="topbar-sub">${counts.inbox} waiting</span>` :
       state.view === "plans" ? `<span class="topbar-sub">${counts.plans} in flight</span>` :
       state.view === "decisions" ? `<span class="topbar-sub">${counts.decisions} · newest carry the weight</span>` :
+    state.view === "glossary" ? `<span class="topbar-sub">${counts.glossary} · one word, one meaning</span>` :
       "";
     leftHTML = `<span class="topbar-title">${VIEW_TITLES[state.view] || ""}</span>${sub}`;
   }
@@ -1238,8 +1366,12 @@ function renderBoard() {
       });
     }
 
-    // Decisions live in the Decisions view
-    let filtered = cards.filter((c) => c.type !== "item" || c.entity.type !== "decision");
+    // Decisions live in the Decisions view; glossary terms (and any other
+    // frontier:false type) are reference material, not work in a column.
+    const offBoard = nonFrontierTypes();
+    let filtered = cards.filter(
+      (c) => c.type !== "item" || (c.entity.type !== "decision" && !offBoard.has(c.entity.type)),
+    );
 
     // Project scope: project entities + unassigned inbox tickets (draggable into the project)
     if (scope.project) {
@@ -1770,6 +1902,67 @@ function decisionWeekGroups(decisions) {
     }
   }
   return groups;
+}
+
+// The glossary is the vocabulary, not a work queue: a flat alphabetical list,
+// because 20-40 entries are meant to be read whole. Signposts are called out
+// explicitly — a word with no single meaning is the thing worth noticing.
+function renderGlossaryView() {
+  const container = document.getElementById("glossaryView");
+  if (!container) return;
+
+  const searchQuery = state.search.toLowerCase();
+  const terms = state.items
+    .filter((item) => {
+      if (item.type !== "term") return false;
+      if (!searchQuery) return true;
+      const haystack = [item.title, item.id, item.body, ...(item.aliases || [])]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(searchQuery);
+    })
+    .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
+
+  if (terms.length === 0) {
+    container.innerHTML = state.search
+      ? '<div class="view-empty">No terms match.</div>'
+      : '<div class="view-empty">No terms yet — one word, one meaning.<br>' +
+        '<code>pm create term "the-word" --body "One sentence."</code></div>';
+    return;
+  }
+
+  const index = window.PMGlossary ? getTermIndex() : null;
+  const titleById = new Map(state.items.map((i) => [i.id, i.title || i.id]));
+
+  const rows = terms.map((t) => {
+    const meta = index && index.terms.get(t.id);
+    const signpost = meta && meta.kind === "signpost";
+    const aliases = (t.aliases || []).length
+      ? `<span class="dd-chip">also: ${escText((t.aliases || []).join(", "))}</span>`
+      : "";
+    const definition = signpost
+      ? `<span class="term-ambiguous-note">Ambiguous — use ${escText(
+          (t.related || []).map((r) => titleById.get(r) || r).join(", "),
+        )} instead</span>`
+      : t.body
+        ? mdToHtml(t.body)
+        : '<span class="term-undefined-note">No definition yet</span>';
+    return `
+      <div class="dd-row${signpost ? " term-row-ambiguous" : ""}" data-id="${escAttr(t.id)}">
+        <div class="dd-featured-head">
+          <span class="dd-id">${escText(t.id)}</span>
+          <span class="dd-featured-title">${escText(t.title)}</span>
+          ${aliases}
+        </div>
+        <div class="dd-featured-body">${definition}</div>
+      </div>`;
+  });
+
+  container.innerHTML = `<div class="dd-list">${rows.join("")}</div>`;
+  container.querySelectorAll(".dd-row[data-id]").forEach((el) => {
+    el.addEventListener("click", () => showDetailOverlay(el.dataset.id));
+  });
+  wireEntityRefs(container);
 }
 
 function renderDecisionsView() {
@@ -2659,8 +2852,17 @@ function showDetailOverlay(itemId) {
 
   const kind = ticketKind(item);
   const isDecision = item.type === "decision";
-  const chipColor = isDecision ? "#52a9ff" : kind ? kindColor(kind) : "#9b9fad";
-  const chipLabel = isDecision ? "Decision" : kind || item.type || "ticket";
+  // Configured types get their own label/colour rather than falling through to
+  // the raw type string and a neutral grey.
+  const typeMeta = Object.values(pmConfig.entityTypes || {}).find(
+    (m) => m && String(m.label || "").toLowerCase() === item.type,
+  );
+  const chipColor = isDecision
+    ? "#52a9ff"
+    : kind
+      ? kindColor(kind)
+      : typeMeta?.color || "#9b9fad";
+  const chipLabel = isDecision ? "Decision" : kind || typeMeta?.label || item.type || "ticket";
 
   const stageOptions = STAGES_FOR_ITEMS.map(
     (s) =>

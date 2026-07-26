@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import { execSync, spawn } from 'child_process';
 import http from 'http';
 import https from 'https';
+import { buildTermIndex, findTermMatches, firstMatchPerTerm, describeConflict } from '../lib/glossary.js';
+import { getDefaultEntityTypes } from '../lib/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILENAME = 'pm.config.json';
@@ -197,6 +199,60 @@ function printList(items) {
   }
 }
 
+// --- Glossary ---
+// Terms are surfaced two ways, never by rewriting stored prose: `pm glossary`
+// dumps the whole vocabulary (20-40 entries — an agent reads it once and holds
+// it), and `pm get` footnotes the terms it just printed.
+async function fetchTerms() {
+  const items = await api('GET', '/api/items?type=term', undefined, { silent: true });
+  return Array.isArray(items) ? items : [];
+}
+
+function printGlossary(terms) {
+  if (flags.json === 'true') {
+    process.stdout.write(JSON.stringify(terms, null, 2) + '\n');
+    return;
+  }
+  if (terms.length === 0) {
+    process.stdout.write('(no terms yet — pm create term "the-word" --body "One sentence.")\n');
+    return;
+  }
+  const index = buildTermIndex(terms);
+  const sorted = [...terms].sort((a, b) => String(a.title).localeCompare(String(b.title)));
+  const idWidth = Math.max(...sorted.map(t => String(t.id || '').length));
+  const titleWidth = Math.max(...sorted.map(t => String(t.title || '').length));
+  for (const t of sorted) {
+    const meta = index.terms.get(t.id);
+    const gloss = meta?.kind === 'signpost'
+      ? `⚠ ambiguous — see ${meta.targetTitles.join(', ')}`
+      : truncate(String(t.body || '').split('\n').find(l => l.trim()) || '(undefined)', 88);
+    process.stdout.write(
+      `${String(t.id).padEnd(idWidth)}  ${String(t.title).padEnd(titleWidth)}  ${gloss}\n`
+    );
+  }
+  for (const c of index.conflicts) {
+    process.stderr.write(`warning: ${describeConflict(c)}\n`);
+  }
+}
+
+// Terms mentioned in what `pm get` just printed. Written to stderr so stdout
+// stays pure JSON — agents pipe `pm get X | jq` and still see the footer.
+async function printGlossaryFooter(entity) {
+  if (!entity || typeof entity !== 'object') return;
+  const terms = await fetchTerms().catch(() => []);
+  if (terms.length === 0) return;
+  const scanned = [
+    entity.title || entity.name || '',
+    entity.body || entity.description || '',
+    ...(Array.isArray(entity.comments) ? entity.comments.map(c => c?.text || '') : [])
+  ].join('\n');
+  const index = buildTermIndex(terms);
+  const mentioned = firstMatchPerTerm(findTermMatches(scanned, index));
+  if (mentioned.length === 0) return;
+  const parts = mentioned.map(m => `${m.termId} ${m.title}${m.kind === 'signpost' ? ' (ambiguous)' : ''}`);
+  process.stderr.write(`\nGlossary: ${parts.join(' · ')}\n`);
+}
+
 // --- Sprint/project overview formatter ---
 // Progressive disclosure for agents: `pm project` prints a one-line-per-entity
 // overview (stage, open blockers, plan progress) instead of the full JSON dump
@@ -275,11 +331,25 @@ const RESERVED_LIST_TYPES = {
   plan: 'plan', plans: 'plan',
   sprint: 'sprint', sprints: 'sprint', project: 'sprint', projects: 'sprint'
 };
+// Structural entities have dedicated commands and their own API collections.
+const STRUCTURAL_PREFIXES = ['SDD', 'PLAN', 'SPRINT', 'TASK', 'MILESTONE'];
+
+// The server merges pm.config.json OVER the built-in defaults (lib/config.js
+// mergeDeep), so a project config that omits a default type still has it. The
+// CLI must resolve the same union, or it rejects ids the server just minted.
+function itemEntityTypes() {
+  const merged = { ...getDefaultEntityTypes(), ...(config?.entityTypes || {}) };
+  for (const prefix of STRUCTURAL_PREFIXES) delete merged[prefix];
+  return merged;
+}
+
+function itemPrefixes() {
+  return Object.keys(itemEntityTypes());
+}
+
 function buildTypeAliases() {
   const aliases = { ...RESERVED_LIST_TYPES };
-  const entityTypes = config?.entityTypes || {};
-  for (const [prefix, def] of Object.entries(entityTypes)) {
-    if (['SDD', 'PLAN', 'SPRINT', 'TASK', 'MILESTONE'].includes(prefix)) continue;
+  for (const [prefix, def] of Object.entries(itemEntityTypes())) {
     const label = String(def.label || prefix).toLowerCase();
     aliases[prefix.toLowerCase()] = label;
     aliases[label] = label;
@@ -334,12 +404,7 @@ async function fetchListByType(typeArg) {
 // --- ID prefix routing ---
 function routeById(id) {
   const upper = id.toUpperCase();
-  // Use config entity types if available, otherwise fallback to defaults
-  const itemPrefixes = config?.entityTypes
-    ? Object.keys(config.entityTypes).filter(p => !['SDD', 'PLAN', 'SPRINT', 'TASK', 'MILESTONE'].includes(p))
-    : ['SB', 'DD', 'DC', 'GAP'];
-
-  for (const prefix of itemPrefixes) {
+  for (const prefix of itemPrefixes()) {
     if (upper.startsWith(`${prefix}-`)) return `/api/items/${id}`;
   }
   if (upper.startsWith('PLAN-')) return `/api/plans/${id}`;
@@ -355,11 +420,7 @@ function routeById(id) {
 
 function commentRoute(id) {
   const upper = id.toUpperCase();
-  const itemPrefixes = config?.entityTypes
-    ? Object.keys(config.entityTypes).filter(p => !['SDD', 'PLAN', 'SPRINT', 'TASK', 'MILESTONE'].includes(p))
-    : ['SB', 'DD', 'DC', 'GAP'];
-
-  for (const prefix of itemPrefixes) {
+  for (const prefix of itemPrefixes()) {
     if (upper.startsWith(`${prefix}-`)) return `/api/items/${id}/comments`;
   }
   if (upper.startsWith('SDD-')) return `/api/designs/${id}/comments`;
@@ -464,7 +525,7 @@ Commands:
   list [<type>] [--stage S] [--priority P] [--sprint ID] [--frontier] [--limit N] [--all] [--json]
                                  List entities — terse "ID  title", sorted
                                  oldest→newest, default 20. <type> is one of:
-                                 sdd, plan, sprint, issue, decision, concern, gap.
+                                 sdd, plan, sprint, issue, decision, concern, gap, term.
                                  Omit <type> to list all items.
                                  --frontier: not done, unblocked, not claimed
                                  (--all-claims: include claimed tickets too)
@@ -479,6 +540,16 @@ Commands:
                                  Add comment (default author: claude)
   archive <id> [<id2>...]        Archive items by ID
   sweep [--days N]               Auto-archive done items (default: 1 day)
+
+Glossary (one word, one meaning):
+  glossary [--json]              Print every term — read it once, hold it. Words
+                                 with no definition are signposts: they list the
+                                 unambiguous words to use instead.
+  create term "the-word" --body "One sentence."
+  patch TERM-001 --aliases the-words,the-wording
+                                 Explicit inflections only — never stemming, and
+                                 an alias may never be an ambiguous word itself.
+                                 (pm get footnotes the terms it just printed.)
 
   Common patch fields:
     --stage S       Move to stage
@@ -794,8 +865,18 @@ async function main() {
         if (comments?.length) rest.commentCount = comments.length;
         process.stdout.write(JSON.stringify(rest, null, 2) + '\n');
       } else {
-        await api('GET', routeById(id));
+        const entity = await api('GET', routeById(id), undefined, { silent: true });
+        process.stdout.write(JSON.stringify(entity, null, 2) + '\n');
+        await printGlossaryFooter(entity);
       }
+      break;
+    }
+
+    case 'glossary': {
+      // Deliberately NOT a get-or-create shorthand like `pm issue`/`pm decision`:
+      // for a curated glossary, `pm term merje` silently minting junk is a bad
+      // trade. Lookup is `pm get TERM-001`; creation is `pm create term "word"`.
+      printGlossary(await fetchTerms());
       break;
     }
 

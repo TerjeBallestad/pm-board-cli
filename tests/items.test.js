@@ -131,6 +131,57 @@ test('sweep skips decisions even when done', async (t) => {
   assert.equal(swept.body.archived, 0);
 });
 
+test('sweep skips glossary terms even when done', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const term = await request(app).post('/api/items').send({ type: 'term', title: 'git-merge' });
+  const issue = await request(app).post('/api/items').send({ type: 'issue', title: 'work' });
+  await request(app).patch(`/api/items/${term.body.id}`).send({ stage: 'done' });
+  await request(app).patch(`/api/items/${issue.body.id}`).send({ stage: 'done' });
+  const swept = await request(app).post('/api/items/archive/sweep').send({ days: 0 });
+  assert.deepEqual(swept.body.ids, [issue.body.id], 'the term survives, the ticket does not');
+});
+
+test('frontier excludes terms but still includes decisions', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  await request(app).post('/api/items').send({ type: 'term', title: 'git-merge' });
+  await request(app).post('/api/items').send({ type: 'decision', title: 'd' });
+  await request(app).post('/api/items').send({ type: 'issue', title: 'i' });
+  const res = await request(app).get('/api/items?frontier=true');
+  // frontier:false is what removes terms. Decisions only set sweep:false, so
+  // their frontier behaviour must be exactly what it was before the flags existed.
+  assert.deepEqual(res.body.map(i => i.type).sort(), ['decision', 'issue']);
+});
+
+test('aliases round-trip through create, patch and string coercion', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const created = await request(app)
+    .post('/api/items')
+    .send({ type: 'term', title: 'loss-window', aliases: ['loss-windows'] });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.body.aliases, ['loss-windows']);
+
+  const patched = await request(app)
+    .patch(`/api/items/${created.body.id}`)
+    .send({ aliases: 'loss-windows,loss-windowing' });
+  assert.deepEqual(patched.body.aliases, ['loss-windows', 'loss-windowing'], 'comma string coerced');
+
+  const fetched = await request(app).get(`/api/items/${created.body.id}`);
+  assert.deepEqual(fetched.body.aliases, ['loss-windows', 'loss-windowing'], 'persisted to disk');
+});
+
+test('an unknown type is rejected instead of minting a mismatched id', async (t) => {
+  const { app, cleanup } = await setupTestApp();
+  t.after(cleanup);
+  const res = await request(app).post('/api/items').send({ type: 'nonsense', title: 'x' });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /Unknown type "nonsense"/);
+  const list = await request(app).get('/api/items');
+  assert.deepEqual(list.body, [], 'nothing was created');
+});
+
 test('archive moves item out of active list', async (t) => {
   const { app, cleanup } = await setupTestApp();
   t.after(cleanup);

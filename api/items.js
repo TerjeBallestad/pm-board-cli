@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import * as store from '../lib/store.js';
-import { getConfig, getTypePrefix, resolveDataDir } from '../lib/config.js';
+import { getConfig, getTypePrefix, getNonFrontierTypes, resolveDataDir } from '../lib/config.js';
 import { coerceArrayField } from '../lib/coerce.js';
 
 const router = Router();
@@ -60,9 +60,13 @@ export const listItems = (req, res) => {
     // Frontier = not done, no blocker that is itself an active, not-done item,
     // and not live-claimed by a session (allClaims=true keeps claimed items).
     // Blockers that are done, archived, or unknown ids do not block.
+    // Reference-only types (entityTypes.*.frontier === false, e.g. glossary
+    // terms) are never claimable work, whatever stage they happen to sit in.
     const activeById = new Map(store.get().items.map(i => [i.id, i]));
+    const nonFrontier = getNonFrontierTypes();
     items = items.filter(i => {
       if (i.stage === 'done') return false;
+      if (nonFrontier.has(i.type)) return false;
       if (req.query.allClaims !== 'true' && isClaimLive(i)) return false;
       const blockers = Array.isArray(i.blockedBy) ? i.blockedBy : [];
       return !blockers.some(id => {
@@ -89,11 +93,18 @@ export const getItem = (req, res) => {
 };
 
 export const createItem = (req, res) => {
-  const { type, title, priority, body, pillar, related, affectedFiles, blockedBy, stage } = req.body;
+  const { type, title, priority, body, pillar, related, affectedFiles, blockedBy, stage, aliases } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
   const config = getConfig();
   const stages = config.stages;
   const typePrefix = getTypePrefix();
+  // An unknown type used to fall through to the first configured prefix, so a
+  // typo minted an SB- id carrying someone else's type string. Fail loudly.
+  if (type && !typePrefix[type]) {
+    return res.status(400).json({
+      error: `Unknown type "${type}". Configured types: ${Object.keys(typePrefix).sort().join(', ')}`
+    });
+  }
   const prefix = typePrefix[type] || Object.keys(config.entityTypes)[0] || 'SB';
   const id = store.nextId(prefix);
   const now = new Date().toISOString();
@@ -106,6 +117,8 @@ export const createItem = (req, res) => {
     related: related || [],
     affectedFiles: affectedFiles || [],
     blockedBy: blockedBy || [],
+    // Glossary terms only: explicit inflections that link to this term.
+    aliases: aliases || [],
     sprintId: req.body.sprintId || null,
     assignee: null,
     assignedAt: null,
@@ -126,7 +139,8 @@ export const patchItem = (req, res) => {
   coerceArrayField(req.body, 'related');
   coerceArrayField(req.body, 'affectedFiles');
   coerceArrayField(req.body, 'blockedBy');
-  const allowed = ['title', 'priority', 'pillar', 'stage', 'body', 'related', 'affectedFiles', 'blockedBy', 'sprintId', 'assignee'];
+  coerceArrayField(req.body, 'aliases');
+  const allowed = ['title', 'priority', 'pillar', 'stage', 'body', 'related', 'affectedFiles', 'blockedBy', 'aliases', 'sprintId', 'assignee'];
   for (const key of allowed) {
     if (req.body[key] !== undefined) item[key] = req.body[key];
   }

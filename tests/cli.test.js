@@ -104,9 +104,10 @@ test('--server URL targets that URL, not the local config port', async (t) => {
 
   const res = await runPm(dir, ['get', 'SB-001', '--server', server.url]);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(server.requests.length, 1);
+  // `pm get` costs a second GET: the glossary footer needs the term list.
+  // Both must reach the remote — neither may fall back to the local port.
+  assert.deepEqual(server.requests.map(r => r.url), ['/api/items/SB-001', '/api/items?type=term']);
   assert.equal(server.requests[0].method, 'GET');
-  assert.equal(server.requests[0].url, '/api/items/SB-001');
   assert.equal(JSON.parse(res.stdout).title, 'remote item');
 });
 
@@ -122,8 +123,7 @@ test('--server <host:port> without scheme targets the remote, not local', async 
 
   const res = await runPm(dir, ['get', 'SB-001', '--server', hostPort]);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(server.requests.length, 1);
-  assert.equal(server.requests[0].url, '/api/items/SB-001');
+  assert.deepEqual(server.requests.map(r => r.url), ['/api/items/SB-001', '/api/items?type=term']);
   assert.equal(JSON.parse(res.stdout).title, 'remote item');
 });
 

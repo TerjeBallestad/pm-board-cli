@@ -1216,6 +1216,27 @@ body[data-view="archive"] .rail { display: none; }
 }
 .md-entity-ref:hover { text-decoration: underline; }
 
+/* Glossary terms in rendered prose. Restrained on purpose — a dotted underline
+   reads as "defined elsewhere" without out-shouting the sentence it sits in. */
+.md-term {
+  color: var(--blue);
+  border-bottom: 1px dotted currentColor;
+  cursor: pointer;
+}
+.md-term:hover { border-bottom-style: solid; }
+
+/* A signpost is a word that means two things. Dashed + the warning yellow + a
+   help cursor rather than a link affordance: it is a flag, not a destination. */
+.md-term-ambiguous {
+  color: #e6db74;
+  border-bottom: 1px dashed currentColor;
+  cursor: help;
+}
+
+.term-ambiguous-note { color: #e6db74; }
+.term-undefined-note { color: var(--text-3); font-style: italic; }
+.term-row-ambiguous { border-left: 2px solid #e6db74; }
+
 .detail-body-edit textarea {
   width: 100%;
   background: var(--input);

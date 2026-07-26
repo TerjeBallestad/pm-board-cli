@@ -51,6 +51,7 @@
       <main class="documents-view hidden" id="documentsView"></main>
       <main class="plans-view hidden" id="plansView"></main>
       <main class="decisions-view hidden" id="decisionsView"></main>
+      <main class="decisions-view hidden" id="glossaryView"></main>
       <main class="tests-view hidden" id="testsView"></main>
       <main class="archive-view hidden" id="archiveView"></main>
     </div>
@@ -153,6 +154,14 @@
 <!-- Toast container -->
 <div id="toasts"></div>
 
+<!-- The glossary matcher, shared verbatim with the CLI (served from lib/glossary.js).
+     Modules are implicitly deferred, so this runs after app.js's top level but
+     before DOMContentLoaded — safe as long as nothing touches PMGlossary at
+     app.js's top level. Every call site degrades to "no term links" if absent. -->
+<script type="module">
+  import * as glossary from "/glossary.js";
+  window.PMGlossary = glossary;
+</script>
 <script src="/app.js"></script>
 </body>
 </html>

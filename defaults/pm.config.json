@@ -5,9 +5,10 @@
   "stages": ["inbox", "exploring", "sdd", "planned", "done"],
   "entityTypes": {
     "SB":    { "label": "Issue",    "color": "#66d9ef" },
-    "DD":    { "label": "Decision", "color": "#ae81ff" },
+    "DD":    { "label": "Decision", "color": "#ae81ff", "sweep": false },
     "DC":    { "label": "Concern",  "color": "#e6db74" },
     "GAP":   { "label": "Gap",      "color": "#f92672" },
+    "TERM":  { "label": "Term",     "color": "#a6e22e", "frontier": false, "sweep": false },
     "SDD":   { "label": "Design" },
     "PLAN":  { "label": "Plan" },
     "SPRINT": { "label": "Sprint" },
