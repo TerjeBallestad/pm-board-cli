@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { execSync, spawn } from 'child_process';
 import http from 'http';
 import https from 'https';
-import { buildTermIndex, findTermMatches, firstMatchPerTerm, describeConflict } from '../lib/glossary.js';
+import { buildTermIndex, findTermMatches, firstMatchPerTerm, describeConflict, signpostHint } from '../lib/glossary.js';
 import { getDefaultEntityTypes } from '../lib/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -224,7 +224,7 @@ function printGlossary(terms) {
   for (const t of sorted) {
     const meta = index.terms.get(t.id);
     const gloss = meta?.kind === 'signpost'
-      ? `⚠ ambiguous — see ${meta.targetTitles.join(', ')}`
+      ? `⚠ ${signpostHint(meta.targetTitles)}`
       : truncate(String(t.body || '').split('\n').find(l => l.trim()) || '(undefined)', 88);
     process.stdout.write(
       `${String(t.id).padEnd(idWidth)}  ${String(t.title).padEnd(titleWidth)}  ${gloss}\n`
@@ -249,7 +249,8 @@ async function printGlossaryFooter(entity) {
   const index = buildTermIndex(terms);
   const mentioned = firstMatchPerTerm(findTermMatches(scanned, index));
   if (mentioned.length === 0) return;
-  const parts = mentioned.map(m => `${m.termId} ${m.title}${m.kind === 'signpost' ? ' (ambiguous)' : ''}`);
+  const parts = mentioned.map(m =>
+    `${m.termId} ${m.title}${m.kind === 'signpost' ? ` (${signpostHint(m.targetTitles)})` : ''}`);
   process.stderr.write(`\nGlossary: ${parts.join(' · ')}\n`);
 }
 

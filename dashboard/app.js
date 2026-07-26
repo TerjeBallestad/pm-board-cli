@@ -684,7 +684,7 @@ function mdToHtml(text, seen = new Set()) {
   function termSpan(m) {
     const cls = m.kind === "signpost" ? "md-term md-term-ambiguous" : "md-term";
     const tip = m.kind === "signpost"
-      ? ` title="Ambiguous — use ${escHtml(m.targetTitles.join(", "))} instead"`
+      ? ` title="${escHtml(window.PMGlossary.signpostHint(m.targetTitles))}"`
       : ` title="${escHtml(m.title)}"`;
     // m.text is a slice of already-escaped HTML — re-escaping would double it.
     return `<span class="${cls}" data-term-id="${escHtml(m.termId)}"${tip}>${m.text}</span>`;
@@ -1941,9 +1941,9 @@ function renderGlossaryView() {
       ? `<span class="dd-chip">also: ${escText((t.aliases || []).join(", "))}</span>`
       : "";
     const definition = signpost
-      ? `<span class="term-ambiguous-note">Ambiguous — use ${escText(
-          (t.related || []).map((r) => titleById.get(r) || r).join(", "),
-        )} instead</span>`
+      ? `<span class="term-ambiguous-note">${escText(
+          window.PMGlossary.signpostHint((t.related || []).map((r) => titleById.get(r) || r)),
+        )}</span>`
       : t.body
         ? mdToHtml(t.body)
         : '<span class="term-undefined-note">No definition yet</span>';

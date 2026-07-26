@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { buildTermIndex, findTermMatches, firstMatchPerTerm, isTerm } from '../lib/glossary.js';
+import { buildTermIndex, findTermMatches, firstMatchPerTerm, isTerm, signpostHint } from '../lib/glossary.js';
 
 const term = (id, title, extra = {}) => ({
   id, type: 'term', title, body: `Definition of ${title}.`, aliases: [], related: [], ...extra
@@ -132,6 +132,13 @@ test('an empty glossary matches nothing and never throws', () => {
   assert.equal(index.size, 0);
   assert.deepEqual(findTermMatches('any text at all', index), []);
   assert.deepEqual(findTermMatches('text', null), []);
+});
+
+test('a signpost with one target reads as a correction, not as ambiguity', () => {
+  // "Config note" is not ambiguous — it is simply the wrong word for Catalog.
+  assert.equal(signpostHint(['Catalog']), 'use Catalog instead');
+  assert.equal(signpostHint(['Overskudd', 'Attention']), 'ambiguous — use Overskudd, Attention');
+  assert.equal(signpostHint([]), 'no definition yet');
 });
 
 test('lib/glossary.js stays browser-safe', () => {
