@@ -1,0 +1,70 @@
+{
+  "name": "PM Board CLI",
+  "port": 3336,
+  "dataDir": ".pm/data",
+  "stages": [
+    "inbox",
+    "exploring",
+    "sdd",
+    "planned",
+    "done"
+  ],
+  "entityTypes": {
+    "SB": {
+      "label": "Issue",
+      "color": "#66d9ef"
+    },
+    "DD": {
+      "label": "Decision",
+      "color": "#ae81ff",
+      "sweep": false
+    },
+    "TERM": {
+      "label": "Term",
+      "color": "#a6e22e",
+      "frontier": false,
+      "sweep": false
+    },
+    "DC": {
+      "label": "Concern",
+      "color": "#e6db74"
+    },
+    "GAP": {
+      "label": "Gap",
+      "color": "#f92672"
+    },
+    "SDD": {
+      "label": "Design"
+    },
+    "PLAN": {
+      "label": "Plan"
+    },
+    "SPRINT": {
+      "label": "Sprint"
+    },
+    "TASK": {
+      "label": "Task"
+    },
+    "MILESTONE": {
+      "label": "Milestone"
+    }
+  },
+  "commands": {
+    "ticket": {
+      "default": "Work the PM ticket {id}: {title}"
+    },
+    "sdd": "Work the PM design doc {id}: {title}",
+    "plan": "Execute PM plan {id}",
+    "project": "Work the frontier of PM project {id}"
+  },
+  "knowledgeBase": {
+    "command": "qmd query",
+    "scope": null
+  },
+  "templates": null,
+  "frontend": {
+    "dir": null
+  },
+  "autoCommit": true,
+  "autoSync": false
+}
