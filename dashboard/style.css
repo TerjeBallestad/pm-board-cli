@@ -1057,12 +1057,12 @@ body[data-view="archive"] .rail { display: none; }
   margin-bottom: 16px;
 }
 
+/* The thread lives at the end of .slide-body and scrolls with it — one scroll
+   area for the whole slide-over. Negative margins cancel the body padding so
+   the divider and rail tint span the full width. */
 .slide-thread {
+  margin: 30px -32px -28px;
   border-top: 1px solid var(--border);
-  flex-shrink: 0;
-  max-height: 42%;
-  display: flex;
-  flex-direction: column;
   background: var(--bg-rail);
 }
 
@@ -1434,7 +1434,7 @@ details[open].detail-section > summary.detail-section-title::before { content: "
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 12px 24px 14px;
+  padding: 20px 32px 26px;
 }
 .comments-title {
   font-size: 10.5px;
@@ -1446,35 +1446,43 @@ details[open].detail-section > summary.detail-section-title::before { content: "
   flex-shrink: 0;
 }
 .comment-list {
-  overflow-y: auto;
-  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  max-height: 240px;
+  gap: 18px;
 }
 .comments-empty { color: var(--text-4); font-size: 12px; }
 
-.comment { display: flex; gap: 10px; }
-.comment .act-avatar { width: 24px; height: 24px; font-size: 11px; border-radius: 8px; }
+.comment { display: flex; gap: 12px; }
+.comment .act-avatar { width: 26px; height: 26px; font-size: 11.5px; border-radius: 8px; }
 .comment-main { flex: 1; min-width: 0; }
-.comment-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
-.comment-author { font-size: 12px; font-weight: 700; }
+.comment-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; }
+.comment-author { font-size: 12.5px; font-weight: 700; }
 .comment-time { font-family: var(--mono); font-size: 10px; color: var(--text-4); }
 .comment-text {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
   border-top-left-radius: 3px;
-  padding: 10px 12px;
-  font-size: 12.5px;
-  line-height: 1.6;
+  padding: 11px 14px;
+  font-size: 13.5px;
+  line-height: 1.65;
   color: #c3c8d2;
 }
 .comment-text p { margin: 0 0 8px; }
 .comment-text p:last-child { margin-bottom: 0; }
-.comment-text code { font-family: var(--mono); font-size: 11px; background: var(--input); padding: 1px 4px; border-radius: 3px; }
+.comment-text code { font-family: var(--mono); font-size: 11.5px; background: var(--input); padding: 1px 4px; border-radius: 3px; }
 .comment-text ul, .comment-text ol { margin: 4px 0 8px; padding-left: 18px; }
+/* The thread no longer has its own scroll box, so a wide code block has to
+   scroll inside itself or .slide-body's overflow-x:hidden would clip it. */
+.comment-text pre {
+  background: #0d0e12;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 10px;
+}
+.comment-text pre code { background: transparent; padding: 0; font-size: 11.5px; line-height: 1.6; }
 .comment-text img { max-width: 100%; border-radius: 6px; }
 .comment-text strong { color: var(--text); }
 

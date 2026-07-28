@@ -2603,7 +2603,12 @@ function renderComments(
           body: JSON.stringify({ text, author: "user" }),
         });
         input.value = "";
-        if (onCommentAdded) onCommentAdded();
+        if (onCommentAdded) await onCommentAdded();
+        // The callback re-renders the whole slide-over, which resets the single
+        // scroll area to the top — put the (new) thread back in view.
+        document
+          .getElementById("commentThread")
+          ?.scrollIntoView({ block: "end" });
         showToast("Comment added");
       } catch (err) {
         /* toasted */
@@ -2619,9 +2624,7 @@ function renderComments(
   });
   initImageUpload(input);
 
-  const commentList = container.querySelector("#commentList");
-  if (commentList) commentList.scrollTop = commentList.scrollHeight;
-  wireEntityRefs(commentList);
+  wireEntityRefs(container.querySelector("#commentList"));
 }
 
 // ─────────────────────────────────────────────────────────── Prompt generation helpers
@@ -2781,8 +2784,8 @@ function showProjectDoc(sprintId) {
           </div>
         </div>
       </div>
+      <div class="slide-thread" id="commentThread"></div>
     </div>
-    <div class="slide-thread" id="commentThread"></div>
   `;
 
   overlay.classList.remove("hidden");
@@ -2944,8 +2947,8 @@ function showDetailOverlay(itemId) {
       ${isDecision ? renderTestsWidget(item.tests) : ""}
       ${filesHTML ? `<div class="detail-section"><div class="detail-section-title">Affected files</div>${filesHTML}</div>` : ""}
       <div class="prompt-preview hidden" id="promptPreview"></div>
+      <div class="slide-thread" id="commentThread"></div>
     </div>
-    <div class="slide-thread" id="commentThread"></div>
   `;
 
   renderComments(
@@ -3190,8 +3193,8 @@ function showSddDetail(sddId) {
       <div class="detail-body">${bodyHTML}</div>
       ${renderTestsWidget(sdd.tests)}
       <div class="prompt-preview hidden" id="promptPreview"></div>
+      <div class="slide-thread" id="commentThread"></div>
     </div>
-    <div class="slide-thread" id="commentThread"></div>
   `;
 
   overlay.classList.remove("hidden");
@@ -3440,8 +3443,8 @@ async function showPlanDetail(planId) {
         <div class="task-list" id="planTaskList">${taskListHTML}</div>
       </div>
       <div class="prompt-preview hidden" id="promptPreview"></div>
+      <div class="slide-thread" id="commentThread"></div>
     </div>
-    <div class="slide-thread" id="commentThread"></div>
   `;
 
   overlay.classList.remove("hidden");
