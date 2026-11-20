@@ -2,6 +2,10 @@
 
 Lightweight, file-based project management for agentic workflows. A kanban dashboard, CLI, and REST API designed to split feature development into minimal-context steps that AI agents can execute independently.
 
+> **This is the 0.x line, the local-first edition.** The board lives as files in your repo, and
+> the CLI needs no server. Version 1.x is server-first: one server holds every project's board.
+> `pm update` stays on 0.x. To install 1.x, run `npm i -g @terjeballestad/pm-board-cli@1`.
+
 ## Philosophy
 
 Large features burn through context windows. PM Board enforces a decomposition pipeline that keeps each step small and self-contained:
@@ -89,7 +93,7 @@ Run `pm --help` for the always-current version of this list.
 pm init                          # Create pm.config.json + data directory
 pm serve [--port N] [--restart]  # Start dashboard server (background, detached)
 pm stop                          # Stop the running server (waits for actual exit)
-pm update                        # Self-update to latest npm version (stops/restarts server)
+pm update                        # Self-update to the latest 0.x version (stops/restarts server)
 pm health                        # Health check (includes rewind status)
 ```
 

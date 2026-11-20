@@ -518,7 +518,7 @@ Setup:
   init                           Create pm.config.json in current directory
   serve [--port N] [--restart]   Start the PM dashboard server (background)
   stop                           Stop the running PM server
-  update                         Update pm to latest version
+  update                         Update pm to the latest 0.x version
 
 Commands:
   health                         Server health check
@@ -755,9 +755,11 @@ async function doUpdate() {
     }
   }
 
-  process.stdout.write('Updating @terjeballestad/pm-board-cli...\n');
+  // Pinned to the 0.x line: 1.x is the server-first client (DD-004), and a
+  // jump to it would break every call in a project that is not on the server.
+  process.stdout.write('Updating @terjeballestad/pm-board-cli (0.x line)...\n');
   try {
-    execSync('npm install -g @terjeballestad/pm-board-cli@latest', { stdio: 'inherit' });
+    execSync('npm install -g @terjeballestad/pm-board-cli@0', { stdio: 'inherit' });
     const newPkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
     process.stdout.write(`Updated to v${newPkg.version}\n`);
   } catch (e) {
