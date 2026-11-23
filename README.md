@@ -5,6 +5,8 @@ Lightweight, file-based project management for agentic workflows. A kanban dashb
 > **This is the 0.x line, the local-first edition.** The board lives as files in your repo, and
 > the CLI needs no server. Version 1.x is server-first: one server holds every project's board.
 > `pm update` stays on 0.x. To install 1.x, run `npm i -g @terjeballestad/pm-board-cli@1`.
+> 1.x lives in [pm-board](https://github.com/terjeballestad/pm-board), and its help is `pm help`
+> and `pm help <command>`. Several commands below are gone or hidden in 1.1.
 
 ## Philosophy
 
